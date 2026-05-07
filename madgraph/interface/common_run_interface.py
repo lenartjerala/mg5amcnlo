@@ -2459,7 +2459,19 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
                                         info="Will use re-weighting from pluging %(plug)s")
                 
 
-        reweight_cmd = rwgt_interface(args[0], mother=self)
+        # Check if we should allow MadSpin for FxFx EW Sudakov reweighting
+        # FxFx Sudakov uses forced clustering to reconstruct hard process from decayed events
+        allow_madspin_for_fxfx_sudakov = False
+        reweight_card_path = pjoin(self.me_dir, 'Cards', 'reweight_card.dat')
+        if hasattr(self, 'run_card') and 'ickkw' in self.run_card and int(self.run_card['ickkw']) == 3:
+            # FxFx mode - check if EW Sudakov is enabled in reweight card
+            if os.path.exists(reweight_card_path):
+                with open(reweight_card_path, 'r') as f:
+                    reweight_content = f.read().lower()
+                    if 'include_sudakov' in reweight_content and 'true' in reweight_content:
+                        allow_madspin_for_fxfx_sudakov = True
+
+        reweight_cmd = rwgt_interface(args[0], mother=self, allow_madspin=allow_madspin_for_fxfx_sudakov)
         #reweight_cmd.use_rawinput = False
         #reweight_cmd.mother = self
         wgt_names = reweight_cmd.get_weight_names()

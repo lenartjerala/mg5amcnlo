@@ -35,7 +35,8 @@ C     ROUTINE FOR F2PY to read the benchmark point.
       IMPLICIT NONE
       CHARACTER*512 PATH
 CF2PY INTENT(IN) :: PATH
-      CALL SETPARA(PATH)  !first call to setup the paramaters
+C     Use SETPARA2 to set ParamCardPath for ident_card.dat lookup
+      CALL SETPARA2(PATH)
       RETURN
       END
       

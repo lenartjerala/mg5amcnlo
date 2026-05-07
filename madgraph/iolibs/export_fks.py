@@ -279,16 +279,6 @@ class ProcessExporterFortranFKS(loop_exporters.LoopProcessExporterFortranSA):
                                  'Source','make_opts.inc')).read()  
         replace_dict={}
         replace_dict['link_tir_libs']=' '.join(link_tir_libs)
-        if 'collier' in replace_dict['link_tir_libs']:
-            collierpath = ''
-            for lib in link_tir_libs:
-                if '-lcollier' in lib:
-                    collierpath = lib.split()[0][2:]
-                    break
-            if collierpath:
-                replace_dict['link_tir_libs'] = ' -Wl,-rpath,%s %s ' % (collierpath, replace_dict['link_tir_libs'])
-        #raise Exception
-
         replace_dict['tir_libs']=' '.join(tir_libs)
         replace_dict['dotf']='%.f'
         replace_dict['doto']='%.o'
@@ -1168,7 +1158,8 @@ This typically happens when using the 'low_mem_multicore_nlo_generation' NLO gen
         bornproc = matrix_element.born_me['processes'][0]
         startfromalpha0 = False
         if any([l['is_tagged'] and l['id'] == 22 for l in bornproc['legs']]):
-            startfromalpha0 = bornproc['model'].get('startfromalpha0')
+            if 'loop_qcd_qed_sm_a0' in bornproc['model'].get('modelpath'):
+                startfromalpha0 = True
 
         text = 'logical  startfroma0\nparameter (startfroma0=%s)\n' % bool_dict[startfromalpha0]
         writer.writelines(text)
@@ -2274,6 +2265,13 @@ This typically happens when using the 'low_mem_multicore_nlo_generation' NLO gen
         self.write_sudakov_wrapper(writers.FortranWriter(filename),
                                    matrix_element,has_lo,fortran_model)
 
+        # Generate density matrix wrapper for spin-correlated EW Sudakov
+        # Uses Valentin's GET_DENSITY infrastructure (no separate born_jamp.f needed)
+        if matrix_element.ewsudakov:
+            filename = "density_matrix_wrapper.f"
+            self.write_density_matrix_wrapper(writers.FortranWriter(filename),
+                                              matrix_element, fortran_model)
+
 
 
     def generate_virtuals_from_OLP(self,process_list,export_path, OLP):
@@ -3044,12 +3042,39 @@ Parameters              %(params)s\n\
         file = open(os.path.join(_file_path, \
                           'iolibs/template_files/ewsudakov_wrapper.inc')).read()
         file = file % replace_dict
-        
+
         # Write the file
         writer.writelines(file)
-    
-        return 
 
+        return
+
+
+    #===============================================================================
+    # write_density_matrix_wrapper - density matrix computation wrapper
+    #===============================================================================
+    def write_density_matrix_wrapper(self, writer, matrix_element, fortran_model):
+        """Write the density matrix wrapper used for spin-correlated Sudakov.
+
+        Architecture (delta-only mode):
+          - Fortran: Sudakov kernels via sudakov_wrapper (per-helicity)
+          - Python:  Density matrices via DensityHelper (rw_me_density_prod)
+          - Python:  Normalization of delta using B diagonal from DensityHelper
+
+        This wrapper ONLY computes per-helicity Sudakov corrections.
+        The B matrix is computed by Python's DensityHelper using Valentin's
+        GET_DENSITY from the standalone rw_me_density_prod modules.
+        """
+        # Template no longer uses substitution variables (Phase 1 and 3 removed)
+        # but we keep the dict for backward compatibility
+        replace_dict = {}
+
+        file = open(os.path.join(_file_path,
+                          'iolibs/template_files/density_matrix_wrapper.inc')).read()
+        file = file % replace_dict
+
+        writer.writelines(file)
+
+        return
 
 
     #===============================================================================
@@ -5077,7 +5102,7 @@ class ProcessExporterEWSudakovSA(ProcessOptimizedExporterFortranFKS):
         replace_dict['path'] = os.path.join(self.dir_path, 'SubProcesses')
         replace_dict['pdir_list'] = ", ".join(["'%s'" % dd[0] for dd in self.dirstopdg])  
         replace_dict['pdg2sud'] = ",\n".join([str(self.get_pdg_tuple(dd[1], dd[2], sortfinal=True)) + \
-                ": import_lib('%s')" % dd[0] for dd in self.dirstopdg])   
+                ": importlib.import_module('%s.ewsudpy')" % dd[0] for dd in self.dirstopdg])
 
         replace_dict['pdgsorted'] = ",\n".join(["%s: %s" % (
                         str(self.get_pdg_tuple(dd[1], dd[2], sortfinal=True)),

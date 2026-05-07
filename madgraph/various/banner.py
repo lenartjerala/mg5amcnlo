@@ -3349,6 +3349,7 @@ class RunCard(ConfigFile):
         if not os.path.exists(pjoin(output_dir,path)):
             misc.sprint("include file not existing", pjoin(output_dir,path))
             out = {name: self[name] for name in list_of_params}
+            return out
 
         with open(pjoin(output_dir,path), 'r') as fsock:
             text = fsock.read()

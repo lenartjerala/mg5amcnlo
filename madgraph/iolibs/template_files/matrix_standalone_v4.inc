@@ -659,9 +659,9 @@ C     ROUTINE FOR F2PY to read the benchmark point.
       IMPLICIT NONE   
       CHARACTER*512 PATH
 CF2PY INTENT(IN) :: PATH 
-      call setpara(PATH)  !first call to setup the paramaters    
-      return 
-      end      
+      call setpara2(PATH)  !first call to setup the paramaters (records ParamCardPath)
+      return
+      end
 
       LOGICAL FUNCTION %(proc_prefix)sIS_BORN_HEL_SELECTED(HELID)
       IMPLICIT NONE
