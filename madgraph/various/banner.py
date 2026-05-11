@@ -4392,10 +4392,15 @@ class RunCardLO(RunCard):
 
     dummy_fct_file = {"dummy_cuts": pjoin("SubProcesses","dummy_fct.f"),
                       "get_dummy_x1": pjoin("SubProcesses","dummy_fct.f"),
-                      "get_dummy_x1_x2": pjoin("SubProcesses","dummy_fct.f"), 
+                      "get_dummy_x1_x2": pjoin("SubProcesses","dummy_fct.f"),
                       "dummy_boostframe": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_wgt_custom": pjoin("SubProcesses","dummy_fct.f"),
+                      # bias_weight_function: NLO-style name (kept here for parity with NLO map).
+                      "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
+                      # dummy_bias_fct: legacy no-op stub name some user-generated LHE banners
+                      # carry via custom_fcts. Recognize it so reweight doesn't fail validation.
+                      "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
     
@@ -5822,6 +5827,10 @@ class RunCardNLO(RunCard):
     dummy_fct_file = {"dummy_cuts": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
+                      # dummy_bias_fct: legacy no-op stub name some user-generated LHE banners
+                      # carry via custom_fcts (e.g. grid-generated LHEs). Recognized so reweight
+                      # doesn't fail when run against an LHE whose run_card has it.
+                      "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
 

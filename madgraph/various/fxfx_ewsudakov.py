@@ -3474,8 +3474,12 @@ class FxFxEWSudakovMixin:
         Events with small invariants are in a soft/collinear regime where
         EW Sudakov logs are not reliable. Return True to trigger pass-through.
 
-        Uses same sumdot convention as Fortran ewsudakov_functions.f:
-        s_ij = sign(i,j) * 2 * (p_i · p_j)
+        Uses the same convention as Fortran Source/kin_functions.f::SumDot,
+        i.e. s_ij = (p_i + sign·p_j)² = m_i² + m_j² + sign·2·(p_i·p_j).
+        The mass terms matter when any leg is on-shell at a non-light scale
+        (e.g. the Z resonance in Z+jets: m_Z² ≈ 1.28·M_W²) — without them
+        forward-Z events with Fortran-side r_ij≈0 sneak past this veto and
+        the kernel's rij_ge_mw clamp engages on a clamped log argument.
         """
         if mw2 is None:
             mw2 = MW_POLE**2
@@ -3484,40 +3488,58 @@ class FxFxEWSudakovMixin:
         for i in range(nlegs):
             for j in range(i + 1, nlegs):
                 sign = float(iflist[i] * iflist[j])
-                sij = (
-                    sign
-                    * 2.0
-                    * (
-                        p_in[i][0] * p_in[j][0]
-                        - p_in[i][1] * p_in[j][1]
-                        - p_in[i][2] * p_in[j][2]
-                        - p_in[i][3] * p_in[j][3]
-                    )
-                )
+                e  = p_in[i][0] + sign * p_in[j][0]
+                px = p_in[i][1] + sign * p_in[j][1]
+                py = p_in[i][2] + sign * p_in[j][2]
+                pz = p_in[i][3] + sign * p_in[j][3]
+                sij = e * e - px * px - py * py - pz * pz
                 if abs(sij) < mw2:
                     _dbg(f"[FXFX] Small invariant: s({i},{j})={sij:.1f} < MW²={mw2:.1f}")
                     return True
         return False
 
-    def _build_sudakov_rwgt_dict(self, event, weight, weight_var=None):
-        """Build reweight dictionary with Sudakov weights.
+    # Sudakov variant order — must match the indexing used by both the scalar
+    # ewsudakov() Fortran call (returns res[1..5]) and the banner-label decoder
+    # in reweight_interface.py. Five variants per ξ; ξ_k uses base prefix 20+5k.
+    SUDAKOV_VARIANT_NAMES = (
+        "central",         # res[2]: NLL s_to_rij=ON,  rij_ge_mw=ON   (legacy 20XX)
+        "s_to_rij_off",    # res[3]: NLL s_to_rij=OFF, rij_ge_mw=ON   (legacy 21XX)
+        "LL",              # res[1]: leading-log only
+        "both_off",        # res[4]: NLL s_to_rij=OFF, rij_ge_mw=OFF
+        "rij_ge_mw_off",   # res[5]: NLL s_to_rij=ON,  rij_ge_mw=OFF
+    )
 
-        Maps existing weights:
-            10XX -> 20XX (central, s_to_rij=True)
-            10XX -> 21XX (variation, s_to_rij=False) if weight_var provided
+    def _build_sudakov_rwgt_dict(self, event, weights):
+        """Build reweight dictionary with all five Sudakov variants per ξ.
+
+        Args:
+            weights: iterable of up to 5 floats, in SUDAKOV_VARIANT_NAMES order.
+                     Missing trailing entries are padded with 1.0 (no-correction).
+
+        Maps existing weights for ξ-index k (driven by the ξ-scan loop):
+            10XX -> (20+5k+v)XX  for v ∈ [0..4], one prefix per variant.
+        Legacy compat: ξ=0, v=0 → 2001 (central NLL), v=1 → 2101 (s_to_rij OFF).
         """
         rwgt_dict = copy.deepcopy(event.parse_reweight())
         if rwgt_dict == {}:
             rwgt_dict["1001"] = event.wgt
 
-        rwgt_dict_new = {"orig": event.wgt}
+        weights = list(weights)
+        if len(weights) < 5:
+            weights = weights + [1.0] * (5 - len(weights))
+        elif len(weights) > 5:
+            weights = weights[:5]
+
+        xi_idx = getattr(self, "_current_xi_idx", 0)
+        base_prefix = 20 + 5 * xi_idx
+
+        # 'orig' only on the first ξ-iteration; dispatcher drops it on later merges.
+        rwgt_dict_new = {"orig": event.wgt} if xi_idx == 0 else {}
         for el in rwgt_dict:
             ending = el[-2:]
-            # Central weight: 20XX
-            rwgt_dict_new["20" + ending] = rwgt_dict[el] * weight
-            # Variation weight: 21XX
-            if weight_var is not None:
-                rwgt_dict_new["21" + ending] = rwgt_dict[el] * weight_var
+            for variant_idx, w in enumerate(weights):
+                prefix = base_prefix + variant_idx
+                rwgt_dict_new["%d%s" % (prefix, ending)] = rwgt_dict[el] * w
         return rwgt_dict_new
 
     def _compute_ewsudakov_fxfx_reweight(self, event, sud_mod):
@@ -3532,13 +3554,13 @@ class FxFxEWSudakovMixin:
         # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
         if self._is_2to1_topology(event_to_sud):
             _dbg("  -> 2→1 TOPOLOGY, returning weight=1 pass-through")
-            return self._build_sudakov_rwgt_dict(event, 1.0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
 
         try:
             prep = self._prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)
         except KeyError as exc:
-            _dbg(f"ERROR: {exc}")
-            return {"orig": event.wgt}
+            _dbg(f"ERROR: {exc}, returning weight=1 pass-through (nominal)")
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
         except RuntimeError:
             _dbg("ERROR: order in particle momenta does not match MG convention!")
             sys.exit(3)
@@ -3546,7 +3568,7 @@ class FxFxEWSudakovMixin:
         # PASS-THROUGH: Small invariants (event too soft for Sudakov)
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
             _dbg("  -> SMALL INVARIANT (s_ij < MW²), returning weight=1 pass-through")
-            return self._build_sudakov_rwgt_dict(event, 1.0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
 
         # Compute Sudakov and build reweight dictionary
         rij_override_mod = None
@@ -3560,28 +3582,38 @@ class FxFxEWSudakovMixin:
             if rij_override_prev is not None:
                 self._restore_ewsud_rij_ge_mw(rij_override_mod, rij_override_prev)
 
-        # Use SKD_weak as in LO Sudakov path
-        # Guard against division by zero (consistent with density path at line ~3011)
+        # All five NLL variants returned by Fortran ewsudakov() — order matches
+        # SUDAKOV_VARIANT_NAMES (central, s_to_rij_off, LL, both_off, rij_ge_mw_off).
+        # res[0]=Born, res[1]=LL(sud0), res[2]=central(sud1, s_to_rij ON, rij_ge_mw ON),
+        # res[3]=s_to_rij OFF, res[4]=both OFF, res[5]=rij_ge_mw OFF.
         if abs(res[0]) > 1e-30:
-            sudrat1 = 1.0 + res[2] / res[0]
+            sudrats = [
+                1.0 + res[2] / res[0],   # central
+                1.0 + res[3] / res[0],   # s_to_rij_off
+                1.0 + res[1] / res[0],   # LL
+                1.0 + res[4] / res[0],   # both_off
+                1.0 + res[5] / res[0],   # rij_ge_mw_off
+            ]
         else:
-            _dbg("WARNING: Born amplitude is zero, returning weight=1")
-            sudrat1 = 1.0
+            _dbg("WARNING: Born amplitude is zero, returning weight=1 for all variants")
+            sudrats = [1.0] * 5
 
-        # Damp overly large ratios
-        if abs(sudrat1) > 200:
+        # Damp the central; if it runaway, neutralize the entire variant set so
+        # downstream ratios across variants stay sane.
+        if abs(sudrats[0]) > 200:
             _dbg(
-                f"ERROR: event will not be reweighted because Sudakov ratio is too large: {sudrat1}"
+                f"ERROR: event will not be reweighted because Sudakov ratio is too large: {sudrats[0]}"
             )
-            sudrat1 = 1.0
+            sudrats = [1.0] * 5
 
         # Final output (matching density path format)
         _dbg("-" * 70)
-        _dbg(f"FINAL WEIGHT (scalar FxFx): {sudrat1:.6f}")
+        _dbg(f"FINAL WEIGHTS (scalar FxFx): " +
+             ", ".join(f"{n}={v:.6f}" for n, v in zip(self.SUDAKOV_VARIANT_NAMES, sudrats)))
         _dbg(f"Event original weight: {event.wgt}")
-        _dbg(f"Reweighted = {event.wgt} * {sudrat1:.6f} = {event.wgt * sudrat1:.6e}")
+        _dbg(f"Reweighted (central) = {event.wgt} * {sudrats[0]:.6f} = {event.wgt * sudrats[0]:.6e}")
         _dbg("=" * 70)
-        return self._build_sudakov_rwgt_dict(event, sudrat1)
+        return self._build_sudakov_rwgt_dict(event, sudrats)
 
     def _compute_density_ewsudakov_reweight(self, event, sud_mod):
         """
@@ -3647,7 +3679,7 @@ class FxFxEWSudakovMixin:
         if self._is_2to1_topology(clustered_event):
             _dbg("  -> 2→1 TOPOLOGY, returning weight=1 pass-through")
             density_logger.log_event("passthrough_2to1", [], 0, 1.0)
-            return self._build_sudakov_rwgt_dict(event, 1.0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
 
         _dbg("  -> Clustered event particles:")
         for i, p in enumerate(clustered_event):
@@ -3817,10 +3849,14 @@ class FxFxEWSudakovMixin:
             if DEBUG and "iflist" in prep and "pdg_order" in prep:
 
                 def _sumdot(pi, pj, sign):
-                    # Match MG sumdot convention (2 * Minkowski dot) used in Sudakov kernels.
-                    return (
-                        sign * 2.0 * (pi[0] * pj[0] - pi[1] * pj[1] - pi[2] * pj[2] - pi[3] * pj[3])
-                    )
+                    # Match Fortran Source/kin_functions.f::SumDot = (pi + sign·pj)²
+                    # (= m_i² + m_j² + sign·2·(pi·pj)). Including mass terms is
+                    # required for consistency with the kernel's rij_ge_mw clamp.
+                    e  = pi[0] + sign * pj[0]
+                    px = pi[1] + sign * pj[1]
+                    py = pi[2] + sign * pj[2]
+                    pz = pi[3] + sign * pj[3]
+                    return e * e - px * px - py * py - pz * pz
 
                 mw = getattr(sud_mod, "mdl_mw", None)
                 if mw is None and self.model:
@@ -3853,8 +3889,9 @@ class FxFxEWSudakovMixin:
                 if mw2 is not None and min_abs is not None:
                     _dbg(f"     min|s_ij|={min_abs:.6e}, MW^2={mw2:.6e}")
         except KeyError as exc:
-            _dbg(f"  -> KeyError: {exc}, falling back to scalar")
-            return {"orig": event.wgt}
+            _dbg(f"  -> KeyError: {exc}, returning weight=1 pass-through (nominal)")
+            density_logger.log_event("passthrough_keyerror", [], 0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
         except RuntimeError:
             _dbg("  -> RuntimeError: momentum order mismatch!")
             sys.exit(3)
@@ -3863,7 +3900,7 @@ class FxFxEWSudakovMixin:
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
             _dbg("  -> SMALL INVARIANT (s_ij < MW²), returning weight=1 pass-through")
             density_logger.log_event("passthrough_small_sij", resonances, total_dim, 1.0)
-            return self._build_sudakov_rwgt_dict(event, 1.0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
 
         # Step 4: Try to get density matrix and Sudakov corrections
         weight_var = None  # Initialize variation weight (computed in density path only)
@@ -4194,7 +4231,13 @@ class FxFxEWSudakovMixin:
         _dbg(f"Event original weight: {event.wgt}")
         _dbg(f"Reweighted = {event.wgt} * {weight:.6f} = {event.wgt * weight:.6e}")
         _dbg("=" * 70)
-        return self._build_sudakov_rwgt_dict(event, weight, weight_var)
+        # Density path computes only the central (s_to_rij ON) and the s_to_rij OFF
+        # variation via density_sudakov(). The remaining three variants (LL, both_off,
+        # rij_ge_mw_off) require the scalar ewsudakov() Fortran call, which the density
+        # path does not invoke. Pad them with 1.0 so the banner ↔ event correspondence
+        # is preserved; downstream tools should treat the pads as "no information".
+        wv = weight_var if weight_var is not None else 1.0
+        return self._build_sudakov_rwgt_dict(event, [weight, wv, 1.0, 1.0, 1.0])
 
     # =========================================================================
     # Decay Density Matrix Methods

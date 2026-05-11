@@ -52,12 +52,20 @@ cc
 C     Debug flag that must be 0 for Sudakov functions to return non-zero
       integer deb_settozero
       common /to_deb_settozero/deb_settozero
+C     Helicity filter flag (defaults .true. via BLOCK DATA in
+C     ewsudakov_functions.f; must be cleared per call to defeat the
+C     SAVE'd GOOD_HEL/FIRSTTIME_HEL cache in ewsudakov_wrapper.f, which
+C     would otherwise freeze the helicity mask on event #1)
+      logical sud_filter_hel
+      common /to_filter_hel/ sud_filter_hel
 C-----
 C  BEGIN CODE
 C-----
 
 C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       deb_settozero = 0
+C     Disable cross-event helicity filter
+      sud_filter_hel = .false.
 
       nfksprocess=1
 
