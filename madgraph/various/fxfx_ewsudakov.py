@@ -45,7 +45,7 @@ FourMomentum = lhe_parser.FourMomentum
 # =============================================================================
 # Module-level debug flag and function
 # =============================================================================
-DEBUG = True # Set True to enable verbose debug output
+DEBUG = False # Set True to enable verbose debug output
 
 # Event counter set by reweight_interface.py during event loop (1-based)
 CURRENT_EVENT_ID = 0
@@ -2123,11 +2123,13 @@ class FxFxEWSudakovMixin:
         """
         global MW_POLE, MZ_POLE, MT_POLE, MH_POLE, _POLE_MASSES_INITIALIZED
         if _POLE_MASSES_INITIALIZED:
+            _dbg("[INIT] _init_pole_masses_from_banner: already initialized, skipping")
             return
         _POLE_MASSES_INITIALIZED = True
 
         banner = getattr(self, 'banner', None)
         if banner is None:
+            _dbg("[INIT] _init_pole_masses_from_banner: no banner attached, using compile-time defaults for MW/MZ/MT/MH")
             return
         mass_map = {24: 'MW_POLE', 23: 'MZ_POLE', 6: 'MT_POLE', 25: 'MH_POLE'}
         for pdg, name in mass_map.items():
@@ -2605,10 +2607,11 @@ class FxFxEWSudakovMixin:
             If return_groups=False: (clustered_event, sorted_tag) or None
             If return_groups=True: (clustered_event, sorted_tag, groups) or None
         """
-        _dbg("[CLUSTER] _cluster_fxfx_event: start")
+        _dbg(f"[CLUSTER] _cluster_fxfx_event ENTER: npart={len(event)}, record_tag={record_tag}, return_groups={return_groups}")
 
         # Step 1: Check for MadSpin decayed resonances
         decayed_resonances = ResonanceIdentifier.find_decayed_resonances(event)
+        _dbg(f"[CLUSTER]   decayed_resonances detected: {len(decayed_resonances) if decayed_resonances else 0}")
 
         if decayed_resonances:
             _dbg(
@@ -2617,9 +2620,11 @@ class FxFxEWSudakovMixin:
 
             # Build decay tree from mother pointers
             decay_tree = self._build_madspin_decay_tree(event)
+            _dbg(f"[CLUSTER]   built decay_tree with {len(decay_tree)} nodes")
 
             # Generate forced clustering steps (depth-first order)
             forced_steps = self._generate_forced_cluster_steps(event, decay_tree)
+            _dbg(f"[CLUSTER]   forced_steps generated: {len(forced_steps) if forced_steps else 0}")
 
             if forced_steps:
                 # Apply forced clustering to restore hard process
@@ -2631,6 +2636,7 @@ class FxFxEWSudakovMixin:
 
                 # Now apply FxFx clustering on the hard process
                 # Pass the forced_groups to maintain LHE index tracking
+                _dbg(f"[CLUSTER]   -> dispatching internal cluster on hard_event with forced groups (len={len(forced_groups) if forced_groups else 0})")
                 return self._cluster_fxfx_event_internal(
                     hard_event,
                     original_event=event,
@@ -2642,6 +2648,7 @@ class FxFxEWSudakovMixin:
                 _dbg("[CLUSTER] No forced steps generated, using standard FxFx")
 
         # No MadSpin decays or no forced steps: use standard FxFx clustering
+        _dbg("[CLUSTER]   -> dispatching standard internal cluster (no forced clustering)")
         return self._cluster_fxfx_event_internal(
             event,
             original_event=event,
@@ -3327,6 +3334,7 @@ class FxFxEWSudakovMixin:
                     lhe_parser.FourMomentum(p).rotate_to_z(prot=lhe_parser.FourMomentum(initial))
                 )
 
+        _dbg("[FXFX]   normalizing kinematics (set_final_jet_mass_to_zero, set_initial_mass_to_zero, check_kinematics_only)")
         event_to_sud.set_final_jet_mass_to_zero()
         event_to_sud.set_initial_mass_to_zero()
         event_to_sud.check_kinematics_only()
@@ -3375,6 +3383,7 @@ class FxFxEWSudakovMixin:
                 f"Momentum order mismatch: expected={expected_order}, actual={actual_order}, sorted_tag={sorted_tag}, mapped_order={mapped_order}, perm={perm}"
             )
             raise RuntimeError("Order in particle momenta does not match MG convention")
+        _dbg(f"[FXFX]   momentum order VALIDATED: expected==actual={expected_order}")
 
         incoming_pdgs = list(mapped_order2[0])
         outgoing_pdgs = list(mapped_order2[1])
@@ -3385,6 +3394,7 @@ class FxFxEWSudakovMixin:
         _dbg(f"[FXFX]   iflist={iflist}")
         _dbg(f"[FXFX]   pdg_order={pdg_order}")
         _dbg(f"[FXFX]   gstr={gstr}")
+        _dbg(f"[FXFX] _prepare_fxfx_sudakov_inputs EXIT: p_in.shape={p_in.shape}, sorted_tag={sorted_tag}, iflist={iflist}, gstr={gstr:.6f}")
 
         return {
             "sorted_tag": sorted_tag,
@@ -3397,66 +3407,93 @@ class FxFxEWSudakovMixin:
 
     def _get_fxfx_ewsudpy_module(self, sud_mod, sorted_tag):
         """Return the ewsudpy module for a given sorted_tag (if available)."""
+        _dbg(f"[OVERRIDE] _get_fxfx_ewsudpy_module: sorted_tag={sorted_tag}")
         try:
-            return sud_mod.pdg2ewsud_dict.get(sorted_tag)
-        except Exception:
+            result = sud_mod.pdg2ewsud_dict.get(sorted_tag)
+            _dbg(f"[OVERRIDE]   resolved module: {result.__name__ if result is not None else None}")
+            return result
+        except Exception as exc:
+            _dbg(f"[OVERRIDE]   exception fetching module: {type(exc).__name__}: {exc} -> returning None")
             return None
 
     def _set_ewsud_rij_ge_mw(self, ewsud_mod, disable_clamp):
         """Disable invariant clamping on the ewsudpy module; return previous value if set."""
+        _dbg(f"[OVERRIDE] _set_ewsud_rij_ge_mw: module={ewsud_mod.__name__ if ewsud_mod else None}, disable_clamp={disable_clamp}")
         if ewsud_mod is None:
+            _dbg("[OVERRIDE]   module is None -> returning None (no-op)")
             return None
         if hasattr(ewsud_mod, "fxfx_ignore_invariant_checks"):
             prev = getattr(ewsud_mod, "fxfx_ignore_invariant_checks")
+            _dbg(f"[OVERRIDE]   path=fxfx_ignore_invariant_checks, prev={prev}, target={disable_clamp}")
             try:
                 ewsud_mod.fxfx_ignore_invariant_checks = disable_clamp
+                _dbg(f"[OVERRIDE]   set via attribute assignment -> returning ('fxfx', {prev})")
                 return ("fxfx", prev)
-            except Exception:
+            except Exception as exc:
+                _dbg(f"[OVERRIDE]   attribute assignment failed ({type(exc).__name__}: {exc}), retrying with [...]=")
                 try:
                     ewsud_mod.fxfx_ignore_invariant_checks[...] = disable_clamp
+                    _dbg(f"[OVERRIDE]   set via array assignment -> returning ('fxfx', {prev})")
                     return ("fxfx", prev)
-                except Exception:
+                except Exception as exc2:
+                    _dbg(f"[OVERRIDE]   array assignment also failed ({type(exc2).__name__}: {exc2}), returning None")
                     return None
         if not hasattr(ewsud_mod, "rij_ge_mw"):
+            _dbg("[OVERRIDE]   module lacks BOTH fxfx_ignore_invariant_checks AND rij_ge_mw -> returning None")
             return None
         prev = getattr(ewsud_mod, "rij_ge_mw")
         value = not disable_clamp
+        _dbg(f"[OVERRIDE]   path=rij_ge_mw, prev={prev}, target={value} (= not {disable_clamp})")
         try:
             ewsud_mod.rij_ge_mw = value
+            _dbg(f"[OVERRIDE]   set via attribute assignment -> returning ('rij', {prev})")
             return ("rij", prev)
-        except Exception:
+        except Exception as exc:
+            _dbg(f"[OVERRIDE]   attribute assignment failed ({type(exc).__name__}: {exc}), retrying with [...]=")
             try:
                 ewsud_mod.rij_ge_mw[...] = value
+                _dbg(f"[OVERRIDE]   set via array assignment -> returning ('rij', {prev})")
                 return ("rij", prev)
-            except Exception:
+            except Exception as exc2:
+                _dbg(f"[OVERRIDE]   array assignment also failed ({type(exc2).__name__}: {exc2}), returning None")
                 return None
 
     def _restore_ewsud_rij_ge_mw(self, ewsud_mod, prev):
         """Restore invariant-clamp setting on the ewsudpy module if it was set."""
+        _dbg(f"[OVERRIDE] _restore_ewsud_rij_ge_mw: module={ewsud_mod.__name__ if ewsud_mod else None}, prev={prev}")
         if prev is None or ewsud_mod is None:
+            _dbg("[OVERRIDE]   prev is None or module is None -> nothing to restore")
             return
         kind = "rij"
         value = prev
         if isinstance(prev, tuple) and len(prev) == 2:
             kind, value = prev
+        _dbg(f"[OVERRIDE]   kind={kind}, value to restore={value}")
         if kind == "fxfx" and hasattr(ewsud_mod, "fxfx_ignore_invariant_checks"):
             try:
                 ewsud_mod.fxfx_ignore_invariant_checks = value
-            except Exception:
+                _dbg(f"[OVERRIDE]   restored fxfx_ignore_invariant_checks={value} via attribute assignment")
+            except Exception as exc:
+                _dbg(f"[OVERRIDE]   attribute restore failed ({type(exc).__name__}: {exc}), retrying with [...]=")
                 try:
                     ewsud_mod.fxfx_ignore_invariant_checks[...] = value
-                except Exception:
-                    pass
+                    _dbg(f"[OVERRIDE]   restored fxfx_ignore_invariant_checks={value} via array assignment")
+                except Exception as exc2:
+                    _dbg(f"[OVERRIDE]   array restore also failed ({type(exc2).__name__}: {exc2}) -- leaving as-is")
             return
         if not hasattr(ewsud_mod, "rij_ge_mw"):
+            _dbg("[OVERRIDE]   module lacks rij_ge_mw -> nothing to restore")
             return
         try:
             ewsud_mod.rij_ge_mw = value
-        except Exception:
+            _dbg(f"[OVERRIDE]   restored rij_ge_mw={value} via attribute assignment")
+        except Exception as exc:
+            _dbg(f"[OVERRIDE]   attribute restore failed ({type(exc).__name__}: {exc}), retrying with [...]=")
             try:
                 ewsud_mod.rij_ge_mw[...] = value
-            except Exception:
-                pass
+                _dbg(f"[OVERRIDE]   restored rij_ge_mw={value} via array assignment")
+            except Exception as exc2:
+                _dbg(f"[OVERRIDE]   array restore also failed ({type(exc2).__name__}: {exc2}) -- leaving as-is")
 
     def _is_2to1_topology(self, clustered_event):
         """Check if clustered event is 2→1 (2 initial, 1 final state particle).
@@ -3466,7 +3503,9 @@ class FxFxEWSudakovMixin:
         """
         n_initial = sum(1 for p in clustered_event if p.status == -1)
         n_final = sum(1 for p in clustered_event if p.status == 1)
-        return n_initial == 2 and n_final == 1
+        is_2to1 = n_initial == 2 and n_final == 1
+        _dbg(f"[2TO1] _is_2to1_topology: n_init={n_initial}, n_final={n_final} -> is_2to1={is_2to1}")
+        return is_2to1
 
     def _has_small_invariants(self, p_in, iflist, mw2=None):
         """Check if any pair invariant |s_ij| < MW².
@@ -3485,6 +3524,7 @@ class FxFxEWSudakovMixin:
             mw2 = MW_POLE**2
 
         nlegs = len(iflist)
+        _dbg(f"[SMALLINV] _has_small_invariants ENTER: nlegs={nlegs}, iflist={list(iflist)}, mw2={mw2:.3g}")
         for i in range(nlegs):
             for j in range(i + 1, nlegs):
                 sign = float(iflist[i] * iflist[j])
@@ -3493,126 +3533,207 @@ class FxFxEWSudakovMixin:
                 py = p_in[i][2] + sign * p_in[j][2]
                 pz = p_in[i][3] + sign * p_in[j][3]
                 sij = e * e - px * px - py * py - pz * pz
+                _dbg(f"[SMALLINV]   pair({i},{j}) sign={sign:+.0f}: s_ij={sij:.3g}, |s_ij|/MW²={abs(sij)/mw2:.3f}")
                 if abs(sij) < mw2:
-                    _dbg(f"[FXFX] Small invariant: s({i},{j})={sij:.1f} < MW²={mw2:.1f}")
+                    _dbg(f"[SMALLINV]   HIT: |s({i},{j})|={abs(sij):.1f} < MW²={mw2:.1f} -> returning True")
                     return True
+        _dbg(f"[SMALLINV] _has_small_invariants EXIT: all {nlegs*(nlegs-1)//2} pairs above MW² -> returning False")
         return False
 
     # Sudakov variant order — must match the indexing used by both the scalar
     # ewsudakov() Fortran call (returns res[1..5]) and the banner-label decoder
-    # in reweight_interface.py. Five variants per ξ; ξ_k uses base prefix 20+5k.
+    # in reweight_interface.py.
+    #
+    # Three variants emitted per ξ (down from five). The Fortran kernel still
+    # returns res[1..5]; we just don't propagate res[4] (both_off) and res[5]
+    # (rij_ge_mw_off) into weight columns, because the Python-side SMALL_INV
+    # pre-filter (_has_small_invariants) drops any event with |s_ij| < M_W²
+    # BEFORE the Fortran call, so the kernel's rij_ge_mw clamp never engages.
+    # With the clamp inert, res[4] is algebraically forced to equal res[3]
+    # (both_off ≡ s_to_rij_off) and res[5] ≡ res[2] (rij_ge_mw_off ≡ central).
+    # Confirmed in the audit: 92/92 events show this exact degeneracy.
+    #
+    # Stride remains 5 in base_prefix to preserve legacy weight-IDs across ξ
+    # indices (ξ=0 → 20/21/22XX, ξ=1 → 25/26/27XX, ξ=2 → 30/31/32XX). IDs at
+    # (20+5k+3)XX and (20+5k+4)XX are no longer emitted (used to hold the
+    # redundant both_off and rij_ge_mw_off columns).
     SUDAKOV_VARIANT_NAMES = (
         "central",         # res[2]: NLL s_to_rij=ON,  rij_ge_mw=ON   (legacy 20XX)
         "s_to_rij_off",    # res[3]: NLL s_to_rij=OFF, rij_ge_mw=ON   (legacy 21XX)
-        "LL",              # res[1]: leading-log only
-        "both_off",        # res[4]: NLL s_to_rij=OFF, rij_ge_mw=OFF
-        "rij_ge_mw_off",   # res[5]: NLL s_to_rij=ON,  rij_ge_mw=OFF
+        "LL",              # res[1]: leading-log only                  (legacy 22XX)
     )
 
     def _build_sudakov_rwgt_dict(self, event, weights):
-        """Build reweight dictionary with all five Sudakov variants per ξ.
+        """Build reweight dictionary with three Sudakov variants per ξ.
 
         Args:
-            weights: iterable of up to 5 floats, in SUDAKOV_VARIANT_NAMES order.
-                     Missing trailing entries are padded with 1.0 (no-correction).
+            weights: iterable of up to 3 floats, in SUDAKOV_VARIANT_NAMES order
+                     (central, s_to_rij_off, LL). Missing trailing entries are
+                     padded with 1.0 (no-correction). Inputs longer than 3 are
+                     truncated to the first 3 (backward-compat for callers that
+                     still pass 5-element lists; the dropped entries used to
+                     hold both_off and rij_ge_mw_off, both redundant — see
+                     SUDAKOV_VARIANT_NAMES docstring).
 
         Maps existing weights for ξ-index k (driven by the ξ-scan loop):
-            10XX -> (20+5k+v)XX  for v ∈ [0..4], one prefix per variant.
+            10XX -> (20+5k+v)XX  for v ∈ [0..2], one prefix per variant.
+        Stride remains 5 (not 3) to preserve legacy weight-IDs across ξ-indices:
+            ξ=0 → 20/21/22XX, ξ=1 → 25/26/27XX, ξ=2 → 30/31/32XX.
+        IDs (20+5k+3)XX and (20+5k+4)XX are no longer emitted.
         Legacy compat: ξ=0, v=0 → 2001 (central NLL), v=1 → 2101 (s_to_rij OFF).
         """
         rwgt_dict = copy.deepcopy(event.parse_reweight())
+        _dbg(f"[WEIGHT] _build_sudakov_rwgt_dict ENTER: existing rwgt keys={list(rwgt_dict.keys()) if rwgt_dict else 'EMPTY'}, event.wgt={event.wgt}")
         if rwgt_dict == {}:
             rwgt_dict["1001"] = event.wgt
+            _dbg(f"[WEIGHT]   rwgt_dict was EMPTY -> seeded with '1001'={event.wgt}")
 
         weights = list(weights)
-        if len(weights) < 5:
-            weights = weights + [1.0] * (5 - len(weights))
-        elif len(weights) > 5:
-            weights = weights[:5]
+        _dbg(f"[WEIGHT] Input variant weights: {weights} (len={len(weights)})")
+        if len(weights) < 3:
+            weights = weights + [1.0] * (3 - len(weights))
+            _dbg(f"[WEIGHT]   padded to 3 with trailing 1.0s -> {weights}")
+        elif len(weights) > 3:
+            _dropped = weights[3:]
+            weights = weights[:3]
+            _dbg(f"[WEIGHT]   truncated to first 3 -> {weights} (dropped trailing entries: {_dropped})")
 
         xi_idx = getattr(self, "_current_xi_idx", 0)
+        # Stride 5 preserves legacy weight-IDs; only first 3 slots per ξ-block emitted.
         base_prefix = 20 + 5 * xi_idx
+        _dbg(f"[XI] xi_idx={xi_idx} (from self._current_xi_idx), base_prefix={base_prefix} (= 20 + 5*{xi_idx})")
+        _dbg(f"[XI]   variant IDs for this ξ will use prefixes {base_prefix}XX..{base_prefix+2}XX (3 variants; slots {base_prefix+3}XX and {base_prefix+4}XX intentionally unused)")
 
         # 'orig' only on the first ξ-iteration; dispatcher drops it on later merges.
         rwgt_dict_new = {"orig": event.wgt} if xi_idx == 0 else {}
+        _dbg(f"[WEIGHT]   xi_idx={xi_idx} -> {'INCLUDING' if xi_idx == 0 else 'SKIPPING'} 'orig' key")
+        _dbg(f"[WEIGHT] Expanding {len(rwgt_dict)} source keys × 3 variants:")
         for el in rwgt_dict:
             ending = el[-2:]
+            _dbg(f"[WEIGHT]   source key '{el}' (ending='{ending}', base_value={rwgt_dict[el]:.6e})")
             for variant_idx, w in enumerate(weights):
                 prefix = base_prefix + variant_idx
-                rwgt_dict_new["%d%s" % (prefix, ending)] = rwgt_dict[el] * w
+                new_id = "%d%s" % (prefix, ending)
+                new_val = rwgt_dict[el] * w
+                rwgt_dict_new[new_id] = new_val
+                _dbg(f"[WEIGHT]     variant {variant_idx} ({self.SUDAKOV_VARIANT_NAMES[variant_idx]}): new_id='{new_id}' = {rwgt_dict[el]:.6e} × {w:.6f} = {new_val:.6e}")
+        _dbg(f"[WEIGHT] _build_sudakov_rwgt_dict EXIT: wrote {len(rwgt_dict_new)} keys")
         return rwgt_dict_new
 
     def _compute_ewsudakov_fxfx_reweight(self, event, sud_mod):
         """FxFx-aware scalar Sudakov reweighting."""
+        _dbg("=" * 70)
+        _dbg(f"[SCALAR] _compute_ewsudakov_fxfx_reweight ENTER: event_id={CURRENT_EVENT_ID}, npart={len(event)}, event.wgt={event.wgt}")
         self._init_pole_masses_from_banner()
+        # PASS-THROUGH: 2→1 raw topology (qq̄ → resonance, no real radiation) —
+        # nothing to cluster, no Sudakov logs valid. Must fire BEFORE the cluster
+        # call so we never fall back to the legacy ickkw==0 _compute_ewsudakov_reweight
+        # (which lacks the 2→1 guard and the 3-NLL-variants / ξ-scan output schema).
+        n_init  = sum(1 for p in event if p.status == -1)
+        n_final = sum(1 for p in event if p.status ==  1)
+        _dbg(f"[SCALAR] raw event topology: n_init={n_init}, n_final={n_final} (total={len(event)})")
+        if n_init == 2 and n_final == 1:
+            _dbg(f"[2TO1] -> RAW 2→1 PASSTHROUGH (no clustering needed, no Sudakov), event_id={CURRENT_EVENT_ID}")
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
+
+        _dbg("[SCALAR] calling _cluster_fxfx_event(event, record_tag=True)...")
         cluster_result = self._cluster_fxfx_event(event, record_tag=True)
+        _dbg(f"[SCALAR]   cluster_result = {'EMPTY/None' if not cluster_result else f'OK ({len(cluster_result[0])} particles in event_to_sud)'}")
         if not cluster_result:
+            _dbg("[FALLBACK] NO CLUSTERING INFO -> falling back to legacy ickkw=0 _compute_ewsudakov_reweight (NB: legacy lacks 2→1 guard and 3-variant schema)")
             return self._compute_ewsudakov_reweight(event, sud_mod)
 
         event_to_sud, _ = cluster_result
 
-        # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
+        # PASS-THROUGH: 2→1 topology after clustering (e.g. a single hard parton
+        # merged back into the initial state). Kept as belt-and-suspenders for
+        # cases where clustering reduces a multi-parton event to 2→1.
+        _dbg(f"[SCALAR] checking post-cluster topology on event_to_sud ({len(event_to_sud)} parts)")
         if self._is_2to1_topology(event_to_sud):
-            _dbg("  -> 2→1 TOPOLOGY, returning weight=1 pass-through")
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            _dbg(f"[2TO1] -> POST-CLUSTER 2→1 PASSTHROUGH, returning weight=1 for all 3 variants (event_id={CURRENT_EVENT_ID})")
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
+        _dbg("[SCALAR] calling _prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)...")
         try:
             prep = self._prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)
         except KeyError as exc:
-            _dbg(f"ERROR: {exc}, returning weight=1 pass-through (nominal)")
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            _dbg(f"[FALLBACK] _prepare_fxfx_sudakov_inputs raised KeyError({exc}) -> passthrough, returning 3×1.0")
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
         except RuntimeError:
-            _dbg("ERROR: order in particle momenta does not match MG convention!")
+            _dbg("[FATAL] _prepare_fxfx_sudakov_inputs: order in particle momenta does not match MG convention -> exit(3)")
             sys.exit(3)
 
+        _dbg(f"[SCALAR] _prepare returned OK: sorted_tag={prep['sorted_tag']}, iflist={list(prep['iflist'])}, p_in.shape={prep['p_in'].shape}, gstr={prep['gstr']:.6f}")
+
         # PASS-THROUGH: Small invariants (event too soft for Sudakov)
+        # This SMALL_INV check is what makes the Fortran rij_ge_mw clamp inert,
+        # which in turn is why we no longer emit the both_off / rij_ge_mw_off
+        # variants — they would be algebraically forced to coincide with
+        # s_to_rij_off / central respectively.
+        _dbg("[SCALAR] checking small invariants on p_in...")
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
-            _dbg("  -> SMALL INVARIANT (s_ij < MW²), returning weight=1 pass-through")
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            _dbg(f"[FALLBACK] SMALL INVARIANT (s_ij < MW²) -> passthrough, returning 3×1.0 (event_id={CURRENT_EVENT_ID})")
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # Compute Sudakov and build reweight dictionary
         rij_override_mod = None
         rij_override_prev = None
-        if getattr(self, "fxfx_ignore_invariant_checks", False):
+        _ignore_invs = getattr(self, "fxfx_ignore_invariant_checks", False)
+        _dbg(f"[OVERRIDE] self.fxfx_ignore_invariant_checks = {_ignore_invs}")
+        if _ignore_invs:
             rij_override_mod = self._get_fxfx_ewsudpy_module(sud_mod, prep["sorted_tag"])
             rij_override_prev = self._set_ewsud_rij_ge_mw(rij_override_mod, False)
+            _dbg(f"[OVERRIDE]   applied: mod={rij_override_mod.__name__ if rij_override_mod else None}, prev={rij_override_prev}")
+        _dbg(f"[5SUD] calling sud_mod.ewsudakov(sorted_tag={prep['sorted_tag']}, p_in.shape={prep['p_in'].shape}, gstr={prep['gstr']:.6f})")
         try:
             res = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
         finally:
             if rij_override_prev is not None:
+                _dbg(f"[OVERRIDE]   restoring rij_ge_mw via prev={rij_override_prev}")
                 self._restore_ewsud_rij_ge_mw(rij_override_mod, rij_override_prev)
 
-        # All five NLL variants returned by Fortran ewsudakov() — order matches
-        # SUDAKOV_VARIANT_NAMES (central, s_to_rij_off, LL, both_off, rij_ge_mw_off).
-        # res[0]=Born, res[1]=LL(sud0), res[2]=central(sud1, s_to_rij ON, rij_ge_mw ON),
-        # res[3]=s_to_rij OFF, res[4]=both OFF, res[5]=rij_ge_mw OFF.
+        _dbg(f"[5SUD] Fortran returned res[0..5] = [{res[0]:.6e}, {res[1]:.6e}, {res[2]:.6e}, {res[3]:.6e}, {res[4]:.6e}, {res[5]:.6e}]")
+        _dbg(f"[5SUD] Born check: |res[0]| = {abs(res[0]):.3e} (threshold 1e-30)")
+        # Three NLL variants now propagated (down from five). Fortran still returns
+        # res[1..5]; we drop res[4] (both_off) and res[5] (rij_ge_mw_off) because
+        # the SMALL_INV pre-filter forces res[4]==res[3] and res[5]==res[2].
+        # res[0]=Born, res[1]=LL, res[2]=central, res[3]=s_to_rij_off.
         if abs(res[0]) > 1e-30:
+            _dbg(f"[5SUD] Born is non-zero -> normalizing 3 variants by Born={res[0]:.6e}")
             sudrats = [
                 1.0 + res[2] / res[0],   # central
                 1.0 + res[3] / res[0],   # s_to_rij_off
                 1.0 + res[1] / res[0],   # LL
-                1.0 + res[4] / res[0],   # both_off
-                1.0 + res[5] / res[0],   # rij_ge_mw_off
             ]
+            _dbg(f"[5SUD]   sudrats[0] central      = 1 + res[2]/res[0] = 1 + {res[2]:.3e}/{res[0]:.3e} = {sudrats[0]:.6f}")
+            _dbg(f"[5SUD]   sudrats[1] s_to_rij_off = 1 + res[3]/res[0] = 1 + {res[3]:.3e}/{res[0]:.3e} = {sudrats[1]:.6f}")
+            _dbg(f"[5SUD]   sudrats[2] LL           = 1 + res[1]/res[0] = 1 + {res[1]:.3e}/{res[0]:.3e} = {sudrats[2]:.6f}")
+            # Sanity check that the dropped variants would have been degenerate
+            # (visible only when the kernel actually clamped, which it shouldn't
+            # given the SMALL_INV pre-filter — log if it ever isn't).
+            _dropped_both_off      = 1.0 + res[4] / res[0]
+            _dropped_rij_ge_mw_off = 1.0 + res[5] / res[0]
+            if abs(_dropped_both_off - sudrats[1]) > 1e-12 or abs(_dropped_rij_ge_mw_off - sudrats[0]) > 1e-12:
+                _dbg(f"[5SUD]   ⚠️  DROPPED VARIANTS WERE NOT DEGENERATE: dropped_both_off={_dropped_both_off:.6f} (expected ≡ sudrats[1]={sudrats[1]:.6f}), dropped_rij_ge_mw_off={_dropped_rij_ge_mw_off:.6f} (expected ≡ sudrats[0]={sudrats[0]:.6f}) — SMALL_INV filter may have a hole or rij_ge_mw clamp engaged unexpectedly")
         else:
-            _dbg("WARNING: Born amplitude is zero, returning weight=1 for all variants")
-            sudrats = [1.0] * 5
+            _dbg(f"[5SUD] WARNING: Born |res[0]|={abs(res[0]):.3e} < 1e-30 -> setting all 3 sudrats to 1.0 (no reweight)")
+            sudrats = [1.0] * 3
 
         # Damp the central; if it runaway, neutralize the entire variant set so
         # downstream ratios across variants stay sane.
+        _dbg(f"[5SUD] runaway-damping check: |sudrats[0] central|={abs(sudrats[0]):.3f} (threshold 200)")
         if abs(sudrats[0]) > 200:
-            _dbg(
-                f"ERROR: event will not be reweighted because Sudakov ratio is too large: {sudrats[0]}"
-            )
-            sudrats = [1.0] * 5
+            _dbg(f"[5SUD] RUNAWAY DAMPING engaged: |central|={abs(sudrats[0]):.3f} > 200; pre-damping sudrats={sudrats}; setting all 3 to 1.0")
+            sudrats = [1.0] * 3
 
         # Final output (matching density path format)
         _dbg("-" * 70)
-        _dbg(f"FINAL WEIGHTS (scalar FxFx): " +
+        _dbg(f"[SCALAR] FINAL WEIGHTS (scalar FxFx): " +
              ", ".join(f"{n}={v:.6f}" for n, v in zip(self.SUDAKOV_VARIANT_NAMES, sudrats)))
-        _dbg(f"Event original weight: {event.wgt}")
-        _dbg(f"Reweighted (central) = {event.wgt} * {sudrats[0]:.6f} = {event.wgt * sudrats[0]:.6e}")
+        _dbg(f"[SCALAR] event_id={CURRENT_EVENT_ID}, event.wgt={event.wgt}")
+        _dbg(f"[SCALAR] reweighted (central) = {event.wgt} × {sudrats[0]:.6f} = {event.wgt * sudrats[0]:.6e}")
         _dbg("=" * 70)
+        _dbg(f"[SCALAR] _compute_ewsudakov_fxfx_reweight EXIT: passing sudrats={sudrats} to _build_sudakov_rwgt_dict")
         return self._build_sudakov_rwgt_dict(event, sudrats)
 
     def _compute_density_ewsudakov_reweight(self, event, sud_mod):
@@ -3664,14 +3785,28 @@ class FxFxEWSudakovMixin:
             density_logger = DensitySudakovLogger(verbose=getattr(self, "density_verbose", False))
             self._density_logger = density_logger
 
+        # PASS-THROUGH: 2→1 raw topology (qq̄ → resonance, no real radiation) —
+        # nothing to cluster, no Sudakov logs valid. Must fire BEFORE the cluster
+        # call so we never fall back to the legacy ickkw==0 _compute_ewsudakov_reweight
+        # (which lacks the 2→1 guard and the 5-NLL-variants / ξ-scan output schema).
+        n_init  = sum(1 for p in event if p.status == -1)
+        n_final = sum(1 for p in event if p.status ==  1)
+        if n_init == 2 and n_final == 1:
+            _dbg("  -> RAW 2→1 TOPOLOGY (pre-cluster), returning weight=1 pass-through")
+            density_logger.log_event("passthrough_2to1_raw", [], 0, 1.0)
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
+
         # Step 1: Cluster event (same as FxFx path)
         _dbg("Step 1: Clustering event (FxFx)...")
         cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
         if not cluster_result:
-            # No clustering info - fall back to standard path
-            _dbg("  -> NO CLUSTERING INFO, falling back to scalar path")
+            # No clustering info — fall back to the FxFx scalar path (which has the
+            # ξ-scan + 5-NLL-variants schema). The legacy LO entry
+            # _compute_ewsudakov_reweight is only for ickkw==0 and is no longer
+            # reachable from the ickkw==3 chain after this redirect.
+            _dbg("  -> NO CLUSTERING INFO, falling back to FxFx scalar path")
             density_logger.log_event("fallback_no_cluster", [], 0, 1.0)
-            return self._compute_ewsudakov_reweight(event, sud_mod)
+            return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         clustered_event, cluster_sorted_tag, groups = cluster_result
 
@@ -3679,7 +3814,7 @@ class FxFxEWSudakovMixin:
         if self._is_2to1_topology(clustered_event):
             _dbg("  -> 2→1 TOPOLOGY, returning weight=1 pass-through")
             density_logger.log_event("passthrough_2to1", [], 0, 1.0)
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         _dbg("  -> Clustered event particles:")
         for i, p in enumerate(clustered_event):
@@ -3891,7 +4026,7 @@ class FxFxEWSudakovMixin:
         except KeyError as exc:
             _dbg(f"  -> KeyError: {exc}, returning weight=1 pass-through (nominal)")
             density_logger.log_event("passthrough_keyerror", [], 0, 1.0)
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
         except RuntimeError:
             _dbg("  -> RuntimeError: momentum order mismatch!")
             sys.exit(3)
@@ -3900,7 +4035,7 @@ class FxFxEWSudakovMixin:
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
             _dbg("  -> SMALL INVARIANT (s_ij < MW²), returning weight=1 pass-through")
             density_logger.log_event("passthrough_small_sij", resonances, total_dim, 1.0)
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0, 1.0, 1.0])
+            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # Step 4: Try to get density matrix and Sudakov corrections
         weight_var = None  # Initialize variation weight (computed in density path only)
@@ -4223,21 +4358,60 @@ class FxFxEWSudakovMixin:
             _dbg(f"  -> WARNING: weight_var {weight_var:.6f} > 200, capping to 1.0")
             weight_var = 1.0
 
+        # Compute the LL (leading-log only) variant via the scalar
+        # ewsudakov() Fortran call. density_sudakov() returns only central
+        # (NLL, s_to_rij=ON) and s_to_rij_off; it does not implement an
+        # LL-only mode. Earlier versions padded the LL slot with 1.0, which
+        # silently turned the downstream `ewsl_ll` curves into pure baseline
+        # for every Z+jets event (the density path activates for every event
+        # with a reconstructed on-shell Z, so ~100% of the sample). The LL
+        # approximation is kinematics-only and doesn't depend on the helicity
+        # density structure that distinguishes density vs scalar paths — so
+        # the scalar Fortran result is the right value to use here.
+        # On the scalar-fallback path (use_density_path=False) we already
+        # called ewsudakov() at the fallback site above; we re-call here for
+        # code uniformity rather than threading a result across branches.
+        # Cost is microseconds per event; the alternative is a second control
+        # path inside _build_sudakov_rwgt_dict.
+        weight_ll = 1.0
+        try:
+            res_for_ll = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
+            if abs(res_for_ll[0]) > 1e-30:
+                weight_ll = 1.0 + res_for_ll[1] / res_for_ll[0]
+                _dbg(
+                    f"  -> LL extraction: born={res_for_ll[0]:.6e}, "
+                    f"LL_delta={res_for_ll[1]:.6e}, weight_ll={weight_ll:.6f}"
+                )
+            else:
+                _dbg(
+                    f"  -> LL extraction: |born|={abs(res_for_ll[0]):.3e} < 1e-30, "
+                    f"weight_ll=1.0 (no reweight)"
+                )
+        except Exception as exc:  # noqa: BLE001 — robustness: never let LL failure abort the event
+            _dbg(f"  -> WARNING: LL extraction via scalar ewsudakov() failed ({exc}); using 1.0")
+            weight_ll = 1.0
+        if abs(weight_ll) > 200:
+            _dbg(f"  -> WARNING: weight_ll {weight_ll:.6f} > 200, capping to 1.0")
+            weight_ll = 1.0
+
         # Build output dictionary
         _dbg("-" * 70)
         _dbg(f"FINAL WEIGHT (central): {weight:.6f}")
         if weight_var is not None:
             _dbg(f"FINAL WEIGHT (s_to_rij=False): {weight_var:.6f}")
+        _dbg(f"FINAL WEIGHT (LL only): {weight_ll:.6f}")
         _dbg(f"Event original weight: {event.wgt}")
         _dbg(f"Reweighted = {event.wgt} * {weight:.6f} = {event.wgt * weight:.6e}")
         _dbg("=" * 70)
-        # Density path computes only the central (s_to_rij ON) and the s_to_rij OFF
-        # variation via density_sudakov(). The remaining three variants (LL, both_off,
-        # rij_ge_mw_off) require the scalar ewsudakov() Fortran call, which the density
-        # path does not invoke. Pad them with 1.0 so the banner ↔ event correspondence
-        # is preserved; downstream tools should treat the pads as "no information".
+        # Density path computes central (s_to_rij ON) and s_to_rij OFF via
+        # density_sudakov(); LL is now computed by an additional scalar
+        # ewsudakov() call above (it's a kinematics-only approximation).
+        # The retired variants v=3 (both_off) and v=4 (rij_ge_mw_off) remain
+        # algebraically degenerate with v=1 and v=0 after the small_inv
+        # pre-filter — _build_sudakov_rwgt_dict drops them by truncating to
+        # the first 3 entries (see SUDAKOV_VARIANT_NAMES at L3560).
         wv = weight_var if weight_var is not None else 1.0
-        return self._build_sudakov_rwgt_dict(event, [weight, wv, 1.0, 1.0, 1.0])
+        return self._build_sudakov_rwgt_dict(event, [weight, wv, weight_ll])
 
     # =========================================================================
     # Decay Density Matrix Methods

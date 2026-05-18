@@ -1358,6 +1358,30 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         pi = 3.141592653589
         mW = 80.3
 
+        # 2→1 topology pass-through. Mirrors what _compute_ewsudakov_fxfx_reweight
+        # (fxfx_ewsudakov.py:3555-3557) and _compute_density_ewsudakov_reweight
+        # (fxfx_ewsudakov.py:3678-3682) already do. Without this guard, when the
+        # density path falls back here for un-clusterable 2→1 LHE events
+        # (qq̄ → Z with no real radiation in the FKS counter-event channels),
+        # the scalar kernel hits a clamp+leg-reorder regime where res[2] = −res[0]
+        # and writes 0 into weights[20XX]. Pass-through = LHE base × 1.0 keeps
+        # the variant slot honest (no Sudakov correction for events outside the
+        # Sudakov-logs validity region).
+        n_init  = sum(1 for p in buff_event if p.status == -1)
+        n_final = sum(1 for p in buff_event if p.status ==  1)
+        if n_init == 2 and n_final == 1:
+            rwgt_dict = copy.deepcopy(event.parse_reweight())
+            if rwgt_dict == {}:
+                rwgt_dict['1001'] = orig_wgt
+            xi_idx = getattr(self, '_current_xi_idx', 0)
+            base_prefix = 20 + 5 * xi_idx
+            rwgt_dict_new = {'orig': orig_wgt} if xi_idx == 0 else {}
+            for el in rwgt_dict:
+                ending = el[-2:]
+                for v in range(5):
+                    rwgt_dict_new['%d%s' % (base_prefix + v, ending)] = rwgt_dict[el]
+            return rwgt_dict_new
+
         mgcmd = self.mg5cmd
 
         # identify the process
@@ -2560,7 +2584,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                     nb_core = int(self.options['nb_core'])
                 except (TypeError, KeyError):
                     nb_core = multiprocessing.cpu_count()
-            except ImportError: 
+            except ImportError:
                 nb_core = 1
 
             compile_options = copy.copy(self.options)
