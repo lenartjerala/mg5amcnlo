@@ -3334,6 +3334,17 @@ class FxFxEWSudakovMixin:
                     lhe_parser.FourMomentum(p).rotate_to_z(prot=lhe_parser.FourMomentum(initial))
                 )
 
+        # After boost+rotate, the initial state is algebraically (E/2, 0, 0, +/-E/2)
+        # but carries ~10^-7 x E numerical residue from rotate_to_z. Enforce the
+        # invariant exactly before calling set_initial_mass_to_zero so its strict
+        # precondition cannot be violated by accumulated operator roundoff.
+        p0, p1 = event_to_sud[0], event_to_sud[1]
+        E_in   = abs(p0.E) + abs(p1.E)
+        pz_abs = (abs(p0.pz) + abs(p1.pz)) / 2.0
+        sign0  = +1.0 if p0.pz >= 0 else -1.0
+        p0.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0,  sign0 * pz_abs]))
+        p1.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0, -sign0 * pz_abs]))
+
         _dbg("[FXFX]   normalizing kinematics (set_final_jet_mass_to_zero, set_initial_mass_to_zero, check_kinematics_only)")
         event_to_sud.set_final_jet_mass_to_zero()
         event_to_sud.set_initial_mass_to_zero()
@@ -3558,9 +3569,14 @@ class FxFxEWSudakovMixin:
     # (20+5k+3)XX and (20+5k+4)XX are no longer emitted (used to hold the
     # redundant both_off and rij_ge_mw_off columns).
     SUDAKOV_VARIANT_NAMES = (
-        "central",         # res[2]: NLL s_to_rij=ON,  rij_ge_mw=ON   (legacy 20XX)
-        "s_to_rij_off",    # res[3]: NLL s_to_rij=OFF, rij_ge_mw=ON   (legacy 21XX)
-        "LL",              # res[1]: leading-log only                  (legacy 22XX)
+        "central",         # res[2]: NLL Sudakov, sud_mod=1 (QED excluded)    (legacy 20XX)
+        "s_to_rij_off",    # res[3]: NLL Sudakov, s_to_rij=OFF, rij_ge_mw=ON  (legacy 21XX)
+        "sherpa_qed",      # res[1]: NLL Sudakov, sud_mod=0 (Sherpa-style QED:
+                           #         drops Lem/lem contributions; NOT leading-log only.
+                           #         Both slots compute 2·(LSC+SSC+XXC+PAR); they
+                           #         differ only by the QED-treatment knob in the
+                           #         Fortran kernel — see ewsudakov_functions.f:1-4)
+                           #                                                   (legacy 22XX)
     )
 
     def _build_sudakov_rwgt_dict(self, event, weights):
@@ -4358,60 +4374,58 @@ class FxFxEWSudakovMixin:
             _dbg(f"  -> WARNING: weight_var {weight_var:.6f} > 200, capping to 1.0")
             weight_var = 1.0
 
-        # Compute the LL (leading-log only) variant via the scalar
-        # ewsudakov() Fortran call. density_sudakov() returns only central
-        # (NLL, s_to_rij=ON) and s_to_rij_off; it does not implement an
-        # LL-only mode. Earlier versions padded the LL slot with 1.0, which
-        # silently turned the downstream `ewsl_ll` curves into pure baseline
-        # for every Z+jets event (the density path activates for every event
-        # with a reconstructed on-shell Z, so ~100% of the sample). The LL
-        # approximation is kinematics-only and doesn't depend on the helicity
-        # density structure that distinguishes density vs scalar paths — so
-        # the scalar Fortran result is the right value to use here.
+        # Compute the sherpa_qed variant (res[1], sud_mod=0 in the Fortran kernel
+        # — full NLL Sudakov with QED logs dropped Sherpa-style) via the scalar
+        # ewsudakov() Fortran call. density_sudakov() emits only sud_mod=1
+        # (res[2], QED excluded) and s_to_rij_off (res[3]); it does not emit
+        # the sud_mod=0 slot. Earlier versions padded this slot with 1.0,
+        # silently turning the downstream `ewsl_sherpa_qed` curves into pure
+        # baseline for every event taking the density path.
+        # (Historical note: this slot was previously labelled "LL" / "leading-log
+        # only" in this file and in plot legends — that labelling was wrong; the
+        # Fortran kernel has no LL-only mode. See ewsudakov_functions.f:1-4.)
         # On the scalar-fallback path (use_density_path=False) we already
         # called ewsudakov() at the fallback site above; we re-call here for
         # code uniformity rather than threading a result across branches.
-        # Cost is microseconds per event; the alternative is a second control
-        # path inside _build_sudakov_rwgt_dict.
-        weight_ll = 1.0
+        weight_sherpa_qed = 1.0
         try:
-            res_for_ll = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
-            if abs(res_for_ll[0]) > 1e-30:
-                weight_ll = 1.0 + res_for_ll[1] / res_for_ll[0]
+            res_for_sq = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
+            if abs(res_for_sq[0]) > 1e-30:
+                weight_sherpa_qed = 1.0 + res_for_sq[1] / res_for_sq[0]
                 _dbg(
-                    f"  -> LL extraction: born={res_for_ll[0]:.6e}, "
-                    f"LL_delta={res_for_ll[1]:.6e}, weight_ll={weight_ll:.6f}"
+                    f"  -> sherpa_qed extraction: born={res_for_sq[0]:.6e}, "
+                    f"sq_delta={res_for_sq[1]:.6e}, weight_sherpa_qed={weight_sherpa_qed:.6f}"
                 )
             else:
                 _dbg(
-                    f"  -> LL extraction: |born|={abs(res_for_ll[0]):.3e} < 1e-30, "
-                    f"weight_ll=1.0 (no reweight)"
+                    f"  -> sherpa_qed extraction: |born|={abs(res_for_sq[0]):.3e} < 1e-30, "
+                    f"weight_sherpa_qed=1.0 (no reweight)"
                 )
-        except Exception as exc:  # noqa: BLE001 — robustness: never let LL failure abort the event
-            _dbg(f"  -> WARNING: LL extraction via scalar ewsudakov() failed ({exc}); using 1.0")
-            weight_ll = 1.0
-        if abs(weight_ll) > 200:
-            _dbg(f"  -> WARNING: weight_ll {weight_ll:.6f} > 200, capping to 1.0")
-            weight_ll = 1.0
+        except Exception as exc:  # noqa: BLE001 — robustness: never let extraction failure abort the event
+            _dbg(f"  -> WARNING: sherpa_qed extraction via scalar ewsudakov() failed ({exc}); using 1.0")
+            weight_sherpa_qed = 1.0
+        if abs(weight_sherpa_qed) > 200:
+            _dbg(f"  -> WARNING: weight_sherpa_qed {weight_sherpa_qed:.6f} > 200, capping to 1.0")
+            weight_sherpa_qed = 1.0
 
         # Build output dictionary
         _dbg("-" * 70)
         _dbg(f"FINAL WEIGHT (central): {weight:.6f}")
         if weight_var is not None:
             _dbg(f"FINAL WEIGHT (s_to_rij=False): {weight_var:.6f}")
-        _dbg(f"FINAL WEIGHT (LL only): {weight_ll:.6f}")
+        _dbg(f"FINAL WEIGHT (sherpa_qed): {weight_sherpa_qed:.6f}")
         _dbg(f"Event original weight: {event.wgt}")
         _dbg(f"Reweighted = {event.wgt} * {weight:.6f} = {event.wgt * weight:.6e}")
         _dbg("=" * 70)
-        # Density path computes central (s_to_rij ON) and s_to_rij OFF via
-        # density_sudakov(); LL is now computed by an additional scalar
-        # ewsudakov() call above (it's a kinematics-only approximation).
+        # Density path computes central (sud_mod=1) and s_to_rij OFF via
+        # density_sudakov(); sherpa_qed (sud_mod=0) is computed by an
+        # additional scalar ewsudakov() call above.
         # The retired variants v=3 (both_off) and v=4 (rij_ge_mw_off) remain
         # algebraically degenerate with v=1 and v=0 after the small_inv
         # pre-filter — _build_sudakov_rwgt_dict drops them by truncating to
         # the first 3 entries (see SUDAKOV_VARIANT_NAMES at L3560).
         wv = weight_var if weight_var is not None else 1.0
-        return self._build_sudakov_rwgt_dict(event, [weight, wv, weight_ll])
+        return self._build_sudakov_rwgt_dict(event, [weight, wv, weight_sherpa_qed])
 
     # =========================================================================
     # Decay Density Matrix Methods

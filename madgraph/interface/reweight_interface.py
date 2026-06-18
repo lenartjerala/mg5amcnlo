@@ -1488,6 +1488,17 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             for p in event_to_sud:
                 p.set_momentum(lhe_parser.FourMomentum(p).rotate_to_z(prot=lhe_parser.FourMomentum(initial)))
 
+        # After boost+rotate, the initial state is algebraically (E/2, 0, 0, +/-E/2)
+        # but carries ~10^-7 x E numerical residue from rotate_to_z. Enforce the
+        # invariant exactly before calling set_initial_mass_to_zero so its strict
+        # precondition cannot be violated by accumulated operator roundoff.
+        p0, p1 = event_to_sud[0], event_to_sud[1]
+        E_in   = abs(p0.E) + abs(p1.E)
+        pz_abs = (abs(p0.pz) + abs(p1.pz)) / 2.0
+        sign0  = +1.0 if p0.pz >= 0 else -1.0
+        p0.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0,  sign0 * pz_abs]))
+        p1.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0, -sign0 * pz_abs]))
+
         # Set all light quarks and lepton masses to zero in event file
         #self.set_final_jet_mass_to_zero(event_to_sud)
         event_to_sud.set_final_jet_mass_to_zero()
