@@ -683,8 +683,11 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
 
 
         self.lhe_input.seek(0)
-        # Reset event counter for fresh enumeration in Sudakov loop
+        # Reset event counter and the per-launch FKS accounting (module-level
+        # counters would otherwise accumulate across param-scan iterations and
+        # repeated launch commands).
         fxfx_ewsudakov.CURRENT_EVENT_ID = 0
+        fxfx_ewsudakov.fks_reset_accounting()
         for event_nb,event in enumerate(self.lhe_input):
             # Set current event ID for debug printouts (1-based to match user expectations)
             fxfx_ewsudakov.CURRENT_EVENT_ID = event_nb + 1

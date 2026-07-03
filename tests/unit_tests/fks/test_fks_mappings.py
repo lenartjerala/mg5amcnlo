@@ -7,12 +7,24 @@
 #   - exactness of the on-shell FSR mapping (massive and massless spectators)
 #   - the ISR mapping (momentum conservation, massless beams, reduced sqrt(s))
 #   - the decay-product on-shell transformation (2-body and multi-body)
-#   - EVERY fallback branch of _fks_fsr_mapping, via engineered kinematics
+#   - the reachable fallback branches of _fks_fsr_mapping via engineered
+#     kinematics: zero_krec_momentum, negative_energy, negative_r,
+#     unreachable_target (incl. the pre-fix spurious-root acceptance),
+#     no_solution, degenerate, collinear_unphysical. NOT covered:
+#     degenerate_collinear (vestigial: only reachable for 0 < R < 1e-10 after
+#     the R <= 0 guard), spurious_root (belt-and-suspenders, unreachable if
+#     the R <= 0 guard and A >= |B| hold), superluminal (boundary-only: all
+#     real roots of the squared quadratic satisfy |beta| <= 1 identically)
 #   - mass-label consistency and method accounting in
 #     fxfx_merge_particles_kinematics (label == sqrt(p^2) for fallbacks,
 #     pole mass for successes; check_kinematics_only passes in both cases)
 #   - the A >= |B| spurious-root safety property of the quadratic solver
+#   - fks_methods threading and skip sentinels in _apply_forced_clustering
+#   - the counting gate (_FKS_COUNT_ACTIVE) and fks_reset_accounting()
 #
+# NOT covered here (requires compiled f2py Sudakov modules): the unit_weight
+# policy branch inside the reweight drivers and the end-of-run summary hook in
+# reweight_interface.
 ################################################################################
 from __future__ import division
 
@@ -284,7 +296,15 @@ class TestFSRFallbackBranches(unittest.TestCase):
         p_b = FourMomentum([pair.E / 2, pair.px / 2, 0, pair.pz / 2])
         momenta = beams + [p_a, p_b, spec]
         res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
-        self._assert_fallback(res, momenta, "fks_fsr_unreachable_target")
+        # rhs is an exact float 0 for this construction; do not depend on which
+        # non-success branch classifies it — the physics statement is only that
+        # an at-threshold configuration must never be labelled a success.
+        self.assertNotIn(res["method"], fx.FKS_SUCCESS_METHODS)
+        naive = self._naive(momenta, 2, 3)
+        for comp in ("E", "px", "py", "pz"):
+            self.assertAlmostEqual(
+                getattr(res["mother"], comp), getattr(naive, comp), places=9
+            )
 
 
 class TestMergeLabelConsistency(unittest.TestCase):
@@ -296,9 +316,16 @@ class TestMergeLabelConsistency(unittest.TestCase):
         event = _mk_event(entries)
         before = dict(fx.FKS_METHOD_COUNTS)
         cons_before = fx.FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"]
-        method = fx.fxfx_merge_particles_kinematics(
-            event, i, j, [{"number": i + 1, "id": mother_pdg}]
-        )
+        # Enable the counting gate (normally set by _cluster_fxfx_event for the
+        # first clustering pass of each event of the main loop).
+        prev_gate = fx._FKS_COUNT_ACTIVE
+        fx._FKS_COUNT_ACTIVE = True
+        try:
+            method = fx.fxfx_merge_particles_kinematics(
+                event, i, j, [{"number": i + 1, "id": mother_pdg}]
+            )
+        finally:
+            fx._FKS_COUNT_ACTIVE = prev_gate
         self.assertEqual(
             fx.FKS_METHOD_COUNTS[method], before.get(method, 0) + 1,
             "method counter did not increment",
@@ -443,6 +470,123 @@ class TestDecayTransform(unittest.TestCase):
         out = fx._transform_decay_products_to_onshell([d1, d2], orig, target)
         self.assertAlmostEqual(out[0].E, d1.E, places=9)
         self.assertAlmostEqual(out[1].pz, d2.pz, places=9)
+
+
+class TestForcedClusteringPlumbing(unittest.TestCase):
+    """_apply_forced_clustering: fks_methods threading, conditional mass rule,
+    and the skip-path sentinel."""
+
+    def _dummy_self(self):
+        return type("DummyMixin", (), {})()
+
+    def _madspin_event(self):
+        # LHE 1-based: 1,2 beams; 3: mu+; 4: vm; 5: W+ mother (status 2);
+        # 6: recoil parton. FS total = q = (500,0,0,0).
+        event = _mk_event(
+            [
+                (21, -1, 250, 0, 0, 250),
+                (21, -1, 250, 0, 0, -250),
+                (-13, 1, 150, 150, 0, 0),
+                (14, 1, 250, -250, 0, 0),
+                (24, 2, 400, -100, 0, 0),
+                (21, 1, 100, 100, 0, 0),
+            ]
+        )
+        return event
+
+    def test_success_threading_and_mass(self):
+        event = self._madspin_event()
+        step = fx.ForcedClusterStep(
+            children_lhe_idx=[3, 4], mother_lhe_idx=5, mother_pdg=24,
+            scale=100.0, depth=0,
+        )
+        out, groups = fx.FxFxEWSudakovMixin._apply_forced_clustering(
+            self._dummy_self(), event, [step]
+        )
+        self.assertEqual(out.fks_methods, ["fks_fsr_massive_onshell"])
+        mothers = [p for p in out if abs(getattr(p, "pid", 0)) == 24]
+        self.assertEqual(len(mothers), 1)
+        self.assertEqual(mothers[0].status, 1)
+        self.assertAlmostEqual(mothers[0].mass, fx.MW_POLE, places=9)
+        m_kin = math.sqrt(max(0.0, _m2(FourMomentum(mothers[0]))))
+        self.assertAlmostEqual(m_kin, fx.MW_POLE, places=6)
+
+    def test_skipped_step_records_sentinel(self):
+        event = self._madspin_event()
+        # 1->3 step: not a MadSpin 1->2 topology -> must be skipped AND recorded
+        step = fx.ForcedClusterStep(
+            children_lhe_idx=[3, 4, 6], mother_lhe_idx=5, mother_pdg=24,
+            scale=100.0, depth=0,
+        )
+        out, groups = fx.FxFxEWSudakovMixin._apply_forced_clustering(
+            self._dummy_self(), event, [step]
+        )
+        self.assertEqual(out.fks_methods, ["forced_step_skipped"])
+        self.assertNotIn("forced_step_skipped", fx.FKS_SUCCESS_METHODS)
+        # mother left un-restored (still status 2)
+        mothers = [p for p in out if abs(getattr(p, "pid", 0)) == 24]
+        self.assertEqual(mothers[0].status, 2)
+
+    def test_missing_children_records_sentinel(self):
+        event = self._madspin_event()
+        step = fx.ForcedClusterStep(
+            children_lhe_idx=[3, 99], mother_lhe_idx=5, mother_pdg=24,
+            scale=100.0, depth=0,
+        )
+        out, groups = fx.FxFxEWSudakovMixin._apply_forced_clustering(
+            self._dummy_self(), event, [step]
+        )
+        self.assertEqual(out.fks_methods, ["forced_step_skipped"])
+
+
+class TestAccountingGateAndReset(unittest.TestCase):
+    """Counting gate semantics and per-launch reset."""
+
+    def test_gate_off_means_no_counting(self):
+        entries = [
+            (21, -1, 250, 0, 0, 250),
+            (21, -1, 250, 0, 0, -250),
+            (13, 1, 150, 150, 0, 0),
+            (-14, 1, 250, -250, 0, 0),
+            (21, 1, 100, 100, 0, 0),
+        ]
+        event = _mk_event(entries)
+        prev_gate = fx._FKS_COUNT_ACTIVE
+        fx._FKS_COUNT_ACTIVE = False
+        before = dict(fx.FKS_METHOD_COUNTS)
+        try:
+            method = fx.fxfx_merge_particles_kinematics(
+                event, 2, 3, [{"number": 3, "id": -24}]
+            )
+        finally:
+            fx._FKS_COUNT_ACTIVE = prev_gate
+        self.assertEqual(method, "fks_fsr_massive_onshell")
+        self.assertEqual(
+            fx.FKS_METHOD_COUNTS.get(method, 0), before.get(method, 0),
+            "counter incremented although the gate was off",
+        )
+
+    def test_reset_clears_counters_and_gate_state(self):
+        fx.FKS_METHOD_COUNTS["fks_fsr_massive_onshell"] += 3
+        fx.FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
+        fx._FKS_COUNT_ACTIVE = True
+        fx._FKS_COUNTED_UPTO = 42
+        fx.fks_reset_accounting()
+        self.assertEqual(sum(fx.FKS_METHOD_COUNTS.values()), 0)
+        self.assertEqual(sum(fx.FKS_QUALITY_COUNTS.values()), 0)
+        self.assertFalse(fx._FKS_COUNT_ACTIVE)
+        self.assertEqual(fx._FKS_COUNTED_UPTO, 0)
+
+    def test_summary_reports_fallbacks(self):
+        fx.fks_reset_accounting()
+        fx.FKS_METHOD_COUNTS["fks_fsr_massive_onshell"] += 5
+        fx.FKS_METHOD_COUNTS["fks_fsr_unreachable_target"] += 2
+        text = fx.fks_accounting_summary()
+        self.assertIn("7 clusterings", text)
+        self.assertIn("2 fallback(s)", text)
+        self.assertIn("fks_fsr_unreachable_target", text)
+        self.assertIn("<-- fallback", text)
+        fx.fks_reset_accounting()
 
 
 class TestSpuriousRootSafety(unittest.TestCase):

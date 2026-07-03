@@ -73,18 +73,43 @@ FKS_QUALITY_COUNTS = Counter()  # coarse quality events (aborts, damping, ...)
 #   "accept"      : keep the event, compute weights on the off-pole Born-like
 #                   object (mass label is set to the actual invariant mass so
 #                   downstream kinematics checks remain consistent);
-#   "unit_weight" : force all Sudakov variants to 1 for such events.
+#   "unit_weight" : force all Sudakov variants to 1 for such events (also
+#                   applied when the clustering itself fails, since the method
+#                   history is then unavailable).
 FKS_FALLBACK_POLICY = "accept"
+
+# Counting gate: counters are incremented only during the FIRST clustering
+# pass of each event of the main event loop (CURRENT_EVENT_ID > 0). The
+# catalogue prescan (which clusters every event before the loop with
+# CURRENT_EVENT_ID == 0), the xi-scan re-clusterings and the density->scalar
+# fallback re-clustering of the same event are NOT counted, so the summary is
+# per event rather than per clustering call. Counters are per worker process
+# in multicore runs.
+_FKS_COUNT_ACTIVE = False
+_FKS_COUNTED_UPTO = 0
+
+
+def fks_reset_accounting():
+    """Reset the per-launch counters (called at the start of each event loop)."""
+    global _FKS_COUNT_ACTIVE, _FKS_COUNTED_UPTO
+    FKS_METHOD_COUNTS.clear()
+    FKS_QUALITY_COUNTS.clear()
+    _FKS_COUNT_ACTIVE = False
+    _FKS_COUNTED_UPTO = 0
 
 
 def fks_accounting_summary():
-    """Multi-line summary of FKS-mapping outcomes accumulated in this run."""
+    """Multi-line summary of FKS-mapping outcomes accumulated in this launch.
+
+    Counts are per event (first clustering pass only) and per worker process.
+    """
     total = sum(FKS_METHOD_COUNTS.values())
     n_fallback = sum(
         c for m, c in FKS_METHOD_COUNTS.items() if m not in FKS_SUCCESS_METHODS
     )
     lines = [
-        "FKS mapping outcomes: %d clusterings, %d fallback(s), policy=%s"
+        "FKS mapping outcomes (once per event, per worker): "
+        "%d clusterings, %d fallback(s), policy=%s"
         % (total, n_fallback, FKS_FALLBACK_POLICY)
     ]
     for method, count in sorted(FKS_METHOD_COUNTS.items()):
@@ -1306,25 +1331,28 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
     # Remove radiation particle
     event.pop(to_remove)
 
-    # Per-run accounting and an always-on (cheap) momentum-conservation counter.
-    # All mappings, including the fallbacks, conserve momentum exactly, so any
-    # increment here indicates a genuine bug rather than an expected fallback.
-    FKS_METHOD_COUNTS[method] += 1
-    p_in_sum = FourMomentum(event[0]) + FourMomentum(event[1])
-    p_out_sum = FourMomentum()
-    for idx in range(2, len(event)):
-        p_out_sum += FourMomentum(event[idx])
-    cons_scale = max(abs(p_in_sum.E), 1.0)
-    if (
-        max(
-            abs(p_in_sum.E - p_out_sum.E),
-            abs(p_in_sum.px - p_out_sum.px),
-            abs(p_in_sum.py - p_out_sum.py),
-            abs(p_in_sum.pz - p_out_sum.pz),
-        )
-        > 1e-6 * cons_scale
-    ):
-        FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"] += 1
+    # Per-launch accounting and a cheap momentum-conservation counter, gated so
+    # each event is counted only on its first clustering pass (see module
+    # header). All mappings, including the fallbacks, conserve momentum
+    # exactly, so any conservation increment indicates a genuine bug rather
+    # than an expected fallback.
+    if _FKS_COUNT_ACTIVE:
+        FKS_METHOD_COUNTS[method] += 1
+        p_in_sum = FourMomentum(event[0]) + FourMomentum(event[1])
+        p_out_sum = FourMomentum()
+        for idx in range(2, len(event)):
+            p_out_sum += FourMomentum(event[idx])
+        cons_scale = max(abs(p_in_sum.E), 1.0)
+        if (
+            max(
+                abs(p_in_sum.E - p_out_sum.E),
+                abs(p_in_sum.px - p_out_sum.px),
+                abs(p_in_sum.py - p_out_sum.py),
+                abs(p_in_sum.pz - p_out_sum.pz),
+            )
+            > 1e-6 * cons_scale
+        ):
+            FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"] += 1
 
     # Debug: before/after comparison and momentum conservation verification
     if DEBUG:
@@ -2510,6 +2538,12 @@ class FxFxEWSudakovMixin:
                 _dbg(
                     f"[FORCED]   WARNING: Expected 2 children, got {len(step.children_lhe_idx)}, skipping"
                 )
+                # Record the skip: the mother is left un-restored (status=2,
+                # later stripped), i.e. the hard process is NOT correctly
+                # reconstructed — the policy/counters must see this.
+                forced_methods.append("forced_step_skipped")
+                if _FKS_COUNT_ACTIVE:
+                    FKS_METHOD_COUNTS["forced_step_skipped"] += 1
                 continue
 
             child1_lhe, child2_lhe = step.children_lhe_idx
@@ -2518,9 +2552,15 @@ class FxFxEWSudakovMixin:
             # Find current positions
             if child1_lhe not in lhe_to_pos or child2_lhe not in lhe_to_pos:
                 _dbg("[FORCED]   Children not found in current event, skipping")
+                forced_methods.append("forced_step_skipped")
+                if _FKS_COUNT_ACTIVE:
+                    FKS_METHOD_COUNTS["forced_step_skipped"] += 1
                 continue
             if mother_lhe not in lhe_to_pos:
                 _dbg("[FORCED]   Mother not found in current event, skipping")
+                forced_methods.append("forced_step_skipped")
+                if _FKS_COUNT_ACTIVE:
+                    FKS_METHOD_COUNTS["forced_step_skipped"] += 1
                 continue
 
             child1_pos = lhe_to_pos[child1_lhe]
@@ -2586,7 +2626,8 @@ class FxFxEWSudakovMixin:
                 mother_p.mass = math.sqrt(
                     max(0.0, mother_E**2 - mother_px**2 - mother_py**2 - mother_pz**2)
                 )
-                FKS_METHOD_COUNTS["forced_children_not_active"] += 1
+                if _FKS_COUNT_ACTIVE:
+                    FKS_METHOD_COUNTS["forced_children_not_active"] += 1
                 forced_methods.append("forced_children_not_active")
             else:
                 child1_active = buff_to_active[child1_pos]
@@ -2665,7 +2706,8 @@ class FxFxEWSudakovMixin:
                 # relabelled — the other fallbacks kept the pole label on an
                 # off-pole momentum and crashed check_kinematics_only downstream).
                 fks_method = fks_result.get("method", "")
-                FKS_METHOD_COUNTS[fks_method] += 1
+                if _FKS_COUNT_ACTIVE:
+                    FKS_METHOD_COUNTS[fks_method] += 1
                 forced_methods.append(fks_method)
                 if fks_method in FKS_SUCCESS_METHODS:
                     mother_p.mass = target_mass
@@ -2803,6 +2845,15 @@ class FxFxEWSudakovMixin:
             If return_groups=True: (clustered_event, sorted_tag, groups) or None
         """
         _dbg(f"[CLUSTER] _cluster_fxfx_event ENTER: npart={len(event)}, record_tag={record_tag}, return_groups={return_groups}")
+
+        # Counting gate: only the first clustering pass of each event of the
+        # main event loop feeds the accounting counters (see module header).
+        global _FKS_COUNT_ACTIVE, _FKS_COUNTED_UPTO
+        if CURRENT_EVENT_ID > 0 and CURRENT_EVENT_ID > _FKS_COUNTED_UPTO:
+            _FKS_COUNT_ACTIVE = True
+            _FKS_COUNTED_UPTO = CURRENT_EVENT_ID
+        else:
+            _FKS_COUNT_ACTIVE = False
 
         # Step 1: Check for MadSpin decayed resonances
         decayed_resonances = ResonanceIdentifier.find_decayed_resonances(event)
@@ -3302,7 +3353,8 @@ class FxFxEWSudakovMixin:
                     if "light-like" in str(e):
                         # Light-like p_clustered = can't boost, stop clustering here
                         _dbg(f"[FXFX]   STOP: {e}")
-                        FKS_QUALITY_COUNTS["clustering_stopped_lightlike"] += 1
+                        if _FKS_COUNT_ACTIVE:
+                            FKS_QUALITY_COUNTS["clustering_stopped_lightlike"] += 1
                         stop_clustering = True
                         break
                     if "math domain error" in str(e):
@@ -3310,7 +3362,8 @@ class FxFxEWSudakovMixin:
                         # the legacy ickkw=0 scalar Sudakov and the event is
                         # written to the output as usual.
                         _dbg(f"[FXFX]   clustering aborted (reshuffling failed: {e}); caller falls back to legacy Sudakov, event kept")
-                        FKS_QUALITY_COUNTS["clustering_aborted_math_domain"] += 1
+                        if _FKS_COUNT_ACTIVE:
+                            FKS_QUALITY_COUNTS["clustering_aborted_math_domain"] += 1
                         return None
                     raise
                 fks_methods.append(step_method)
@@ -3865,7 +3918,15 @@ class FxFxEWSudakovMixin:
         _dbg(f"[SCALAR]   cluster_result = {'EMPTY/None' if not cluster_result else f'OK ({len(cluster_result[0])} particles in event_to_sud)'}")
         if not cluster_result:
             _dbg("[FALLBACK] NO CLUSTERING INFO -> falling back to legacy ickkw=0 _compute_ewsudakov_reweight (NB: legacy lacks 2→1 guard and 3-variant schema)")
-            FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
+            if FKS_FALLBACK_POLICY == "unit_weight":
+                # Clustering itself failed, so the method history is not
+                # available; the conservative policy demotes these events too.
+                _dbg("[POLICY] clustering failed and policy=unit_weight -> 3×1.0")
+                if _FKS_COUNT_ACTIVE:
+                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
             return self._compute_ewsudakov_reweight(event, sud_mod)
 
         event_to_sud, _ = cluster_result
@@ -3875,10 +3936,12 @@ class FxFxEWSudakovMixin:
         # non-success method is passed through with unit weights.
         _fks_hist = getattr(event_to_sud, "fks_methods", [])
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
-            FKS_QUALITY_COUNTS["events_with_fsr_fallback"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_with_fsr_fallback"] += 1
             if FKS_FALLBACK_POLICY == "unit_weight":
                 _dbg(f"[POLICY] FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
-                FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                if _FKS_COUNT_ACTIVE:
+                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology after clustering (e.g. a single hard parton
@@ -3960,7 +4023,8 @@ class FxFxEWSudakovMixin:
         _dbg(f"[5SUD] runaway-damping check: |sudrats[0] central|={abs(sudrats[0]):.3f} (threshold 200)")
         if abs(sudrats[0]) > 200:
             _dbg(f"[5SUD] RUNAWAY DAMPING engaged: |central|={abs(sudrats[0]):.3f} > 200; pre-damping sudrats={sudrats}; setting all 3 to 1.0")
-            FKS_QUALITY_COUNTS["events_runaway_damped_scalar"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_runaway_damped_scalar"] += 1
             sudrats = [1.0] * 3
 
         # Final output (matching density path format)
@@ -4051,10 +4115,12 @@ class FxFxEWSudakovMixin:
         # analogue): unit weights for fallback-tainted events when requested.
         _fks_hist = getattr(clustered_event, "fks_methods", [])
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
-            FKS_QUALITY_COUNTS["events_with_fsr_fallback_density"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_with_fsr_fallback_density"] += 1
             if FKS_FALLBACK_POLICY == "unit_weight":
                 _dbg(f"  -> FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
-                FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                if _FKS_COUNT_ACTIVE:
+                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
@@ -4605,11 +4671,13 @@ class FxFxEWSudakovMixin:
         # Damp overly large ratios
         if abs(weight) > 200:
             _dbg(f"  -> WARNING: weight {weight:.6f} > 200, capping to 1.0")
-            FKS_QUALITY_COUNTS["events_runaway_damped_density"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_runaway_damped_density"] += 1
             weight = 1.0
         if weight_var is not None and abs(weight_var) > 200:
             _dbg(f"  -> WARNING: weight_var {weight_var:.6f} > 200, capping to 1.0")
-            FKS_QUALITY_COUNTS["events_runaway_damped_density_var"] += 1
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_runaway_damped_density_var"] += 1
             weight_var = 1.0
 
         # Compute the sherpa_qed variant (res[1], sud_mod=0 in the Fortran kernel
