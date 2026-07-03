@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from functools import reduce
 from itertools import product
@@ -45,10 +46,53 @@ FourMomentum = lhe_parser.FourMomentum
 # =============================================================================
 # Module-level debug flag and function
 # =============================================================================
-DEBUG = False # Set True to enable verbose debug output
+DEBUG = False
 
 # Event counter set by reweight_interface.py during event loop (1-based)
 CURRENT_EVENT_ID = 0
+
+# =============================================================================
+# FKS-mapping accounting and fallback policy
+# =============================================================================
+# The FSR mapping can fail to reach the pole mass (see _fks_fsr_mapping): each
+# outcome is identified by a method string. Successful methods leave the mother
+# exactly on its pole mass; every other method returns an off-pole mother.
+FKS_SUCCESS_METHODS = frozenset(
+    [
+        "fks_fsr_massive_onshell",
+        "fks_fsr_no_spectators_beam_scaled",
+        "fks_isr_cm_boost",
+    ]
+)
+
+# Per-run counters (reset per process; reported by fks_accounting_summary()).
+FKS_METHOD_COUNTS = Counter()  # method string -> number of clusterings
+FKS_QUALITY_COUNTS = Counter()  # coarse quality events (aborts, damping, ...)
+
+# Policy for events whose clustering history contains any FSR fallback:
+#   "accept"      : keep the event, compute weights on the off-pole Born-like
+#                   object (mass label is set to the actual invariant mass so
+#                   downstream kinematics checks remain consistent);
+#   "unit_weight" : force all Sudakov variants to 1 for such events.
+FKS_FALLBACK_POLICY = "accept"
+
+
+def fks_accounting_summary():
+    """Multi-line summary of FKS-mapping outcomes accumulated in this run."""
+    total = sum(FKS_METHOD_COUNTS.values())
+    n_fallback = sum(
+        c for m, c in FKS_METHOD_COUNTS.items() if m not in FKS_SUCCESS_METHODS
+    )
+    lines = [
+        "FKS mapping outcomes: %d clusterings, %d fallback(s), policy=%s"
+        % (total, n_fallback, FKS_FALLBACK_POLICY)
+    ]
+    for method, count in sorted(FKS_METHOD_COUNTS.items()):
+        marker = "" if method in FKS_SUCCESS_METHODS else "  <-- fallback"
+        lines.append("    %-42s %d%s" % (method, count, marker))
+    for name, count in sorted(FKS_QUALITY_COUNTS.items()):
+        lines.append("    %-42s %d" % (name, count))
+    return "\n".join(lines)
 
 
 def _dbg(*args, **kwargs):
@@ -355,7 +399,7 @@ def suggest_mothers_from_interactions(model, perts, child_i, child_j, emitter_st
 
 
 # =============================================================================
-# FxFx Clustering Kinematics (Catani-Seymour reshuffling)
+# FxFx Clustering Kinematics (FKS reshuffling)
 # =============================================================================
 
 
@@ -760,12 +804,25 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     Modified condition:     (q - B k_rec)² = M²       (massive mother)
 
     The boost parameter β is found by solving a quadratic equation.
-    Define:
-        a = q · k_rec                                  (4-vector dot product)
-        b = E_q |k̄_rec| - (q̄ · n̂) E_rec             (mixed term)
-        C = (q² + m²_rec - M²) / 2                    (RHS of boost equation)
+    With n̂ = k⃗_rec/|k⃗_rec|, q_n = q⃗·n̂, p_n = |k⃗_rec|, define:
+        A = q_E E_rec - q_n p_n
+        B = q_n E_rec - q_E p_n
+        R = (q² + m²_rec - M²)/2 + q⃗_perp·k⃗_perp    (k⃗_perp ≡ 0 for the
+                                                       total recoil system)
+    The on-shell condition reads γ(A + β B) = R; squaring gives
+        (B² + R²) β² + 2AB β + (A² - R²) = 0,
+        β = (-AB ± R √(R² + B² - A²)) / (B² + R²).
 
-    Then: β = (-ab ± C√(a² - b² + C²)) / (b² + C²)
+    Spurious-root safety: A ± B = (q_E ± q_n)(E_rec ∓ p_n) ≥ 0 for timelike q
+    and physical k_rec, hence A ≥ |B| and γ(A + βB) > 0 for all |β| < 1.
+    For R > 0 every root with |β| < 1 therefore satisfies the unsquared (+R)
+    equation automatically. For R ≤ 0 the target is physically unreachable
+    (q·k̄ ≥ 0 for future-pointing momenta), yet the squared quadratic still
+    has |β| < 1 roots — all on the spurious (-R) branch. An explicit R ≤ 0
+    guard therefore rejects these configurations up front
+    (method "fks_fsr_unreachable_target"), and the chosen root is verified
+    against the unsquared constraint as a final safety net
+    (method "fks_fsr_spurious_root" if it ever fails).
 
     Args:
         fks_i: Index of "emitter" particle (will become mother)
@@ -1011,6 +1068,26 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
 
         _cluster_dbg(f"  A={A:.4f}, B={B:.4f}, rhs={rhs:.4f}")
 
+        # UNREACHABLE TARGET GUARD: the constraint is γ(A + βB) = rhs, and for
+        # timelike q with a physical spectator system A ≥ |B|, so the left-hand
+        # side is strictly positive for every |β| < 1. Moreover q·k̄ ≥ 0 for any
+        # pair of future-pointing momenta, so rhs ≤ 0 (i.e. q² + m²_rec ≤ M²:
+        # the event is too light to host an on-shell mother plus this spectator
+        # system) is physically unreachable. Without this guard the SQUARED
+        # quadratic below still has |β| < 1 roots for rhs < 0 — but they all
+        # satisfy γ(A + βB) = -rhs (the spurious sign branch) and would silently
+        # put the mother on a WRONG mass while reporting success.
+        if rhs <= 0:
+            _cluster_dbg(
+                f"  WARNING: unreachable on-shell target (rhs={rhs:.4f} <= 0, "
+                f"q²+m²_rec={q2 + k_rec_m2:.2f} < M²={M2:.2f})"
+            )
+            result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
+            for idx in spectator_indices:
+                result["spectators"][idx] = FourMomentum(orig_momenta[idx])
+            result["method"] = "fks_fsr_unreachable_target"
+            return result
+
         # Check for numerical instability: B ≈ 0 means spectators nearly collinear with beam
         # In this limit, the quadratic becomes degenerate. Use simplified formula.
         if abs(B) < 1e-8 * max(abs(A), abs(rhs), 1.0):
@@ -1078,6 +1155,21 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             beta = min(valid_betas, key=abs)
             _cluster_dbg(f"  Chosen β = {beta:.6f}")
 
+            # Belt-and-suspenders: verify the chosen root solves the UNSQUARED
+            # constraint γ(A + βB) = rhs (squaring admits the -rhs branch; with
+            # the rhs > 0 guard above and A ≥ |B| this should never fire, but a
+            # violation here means a silently wrong mother mass downstream).
+            _gamma_chk = 1.0 / math.sqrt(1.0 - beta**2)
+            if abs(_gamma_chk * (A + beta * B) - rhs) > 1e-6 * max(1.0, abs(rhs)):
+                _cluster_dbg(
+                    f"  WARNING: spurious quadratic root (γ(A+βB)={_gamma_chk * (A + beta * B):.4f} != rhs={rhs:.4f})"
+                )
+                result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
+                for idx in spectator_indices:
+                    result["spectators"][idx] = FourMomentum(orig_momenta[idx])
+                result["method"] = "fks_fsr_spurious_root"
+                return result
+
     # Verify |β| < 1
     if abs(beta) >= 1.0:
         _cluster_dbg(f"  WARNING: |β| = {abs(beta):.6f} >= 1 (superluminal)")
@@ -1144,6 +1236,10 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
         event: lhe_parser.Event to modify in-place
         i, j: Particle indices to merge
         moth: Mother info list with moth[0] = {'number': ..., 'id': PDG}
+
+    Returns:
+        The FKS method string of the mapping that was applied (see
+        FKS_SUCCESS_METHODS for the outcomes that reach the pole mass).
     """
     # Determine which particle becomes the mother
     if i == moth[0].get("number") - 1:
@@ -1169,6 +1265,7 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
     if fks_i <= 1:
         # ISR: FKS Section 5.1 mapping
         isr_result = _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta)
+        method = isr_result.get("method", "fks_isr_unknown")
 
         # Apply results to event
         event[0].set_momentum(isr_result["beams"][0])
@@ -1182,6 +1279,7 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
     else:
         # FSR: FKS Section 5.2 mapping
         fks_result = _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta)
+        method = fks_result.get("method", "fks_fsr_unknown")
 
         # Apply results to event
         event[0].set_momentum(fks_result["beams"][0])
@@ -1189,8 +1287,17 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
         event[fks_i].set_momentum(fks_result["mother"])
         event[fks_i].pid = moth[0]["id"]
 
-        # Set mother mass (pole mass from PDG lookup)
-        event[fks_i].mass = _get_mother_mass(abs(moth[0]["id"]))
+        # Mass label must stay consistent with the four-momentum: the pole mass
+        # only when the mapping actually reached the pole; the mother's actual
+        # invariant mass otherwise. Fallback methods return an off-pole mother,
+        # and lhe_parser.Event.check_kinematics_only (invoked from
+        # _prepare_fxfx_sudakov_inputs) raises on a >0.1% label/kinematics
+        # mismatch, so an unconditional pole label turns every fallback into an
+        # uncatchable exception downstream.
+        if method in FKS_SUCCESS_METHODS:
+            event[fks_i].mass = _get_mother_mass(abs(moth[0]["id"]))
+        else:
+            event[fks_i].mass = math.sqrt(max(0.0, _m2(fks_result["mother"])))
 
         # Apply spectator momenta
         for idx, p in fks_result["spectators"].items():
@@ -1198,6 +1305,26 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
 
     # Remove radiation particle
     event.pop(to_remove)
+
+    # Per-run accounting and an always-on (cheap) momentum-conservation counter.
+    # All mappings, including the fallbacks, conserve momentum exactly, so any
+    # increment here indicates a genuine bug rather than an expected fallback.
+    FKS_METHOD_COUNTS[method] += 1
+    p_in_sum = FourMomentum(event[0]) + FourMomentum(event[1])
+    p_out_sum = FourMomentum()
+    for idx in range(2, len(event)):
+        p_out_sum += FourMomentum(event[idx])
+    cons_scale = max(abs(p_in_sum.E), 1.0)
+    if (
+        max(
+            abs(p_in_sum.E - p_out_sum.E),
+            abs(p_in_sum.px - p_out_sum.px),
+            abs(p_in_sum.py - p_out_sum.py),
+            abs(p_in_sum.pz - p_out_sum.pz),
+        )
+        > 1e-6 * cons_scale
+    ):
+        FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"] += 1
 
     # Debug: before/after comparison and momentum conservation verification
     if DEBUG:
@@ -1257,6 +1384,8 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
                 f"  MOTHER MASS: computed={mother_m:.4f}, target={target_m:.4f}, Δ={abs(mother_m - target_m):.2e} GeV"
             )
         _cluster_dbg("=" * 70)
+
+    return method
 
 
 # =============================================================================
@@ -2301,6 +2430,10 @@ class FxFxEWSudakovMixin:
         """
         buff_event = copy.deepcopy(event)
 
+        # Clustering-quality history for this stage (consumed by
+        # _cluster_fxfx_event_internal, which seeds its own list from it)
+        forced_methods = []
+
         # Initialize groups: track which original LHE indices are at each position
         # Only track external particles (status = ±1), not intermediates (status=2)
         # But we need to include status=2 resonances that will become final-state
@@ -2402,6 +2535,13 @@ class FxFxEWSudakovMixin:
                 mother_p.py = mother_py
                 mother_p.pz = mother_pz
                 mother_p.status = 1
+                # Keep the mass label consistent with the (off-shell) momentum,
+                # otherwise check_kinematics_only hard-fails downstream.
+                mother_p.mass = math.sqrt(
+                    max(0.0, mother_E**2 - mother_px**2 - mother_py**2 - mother_pz**2)
+                )
+                FKS_METHOD_COUNTS["forced_children_not_active"] += 1
+                forced_methods.append("forced_children_not_active")
             else:
                 child1_active = buff_to_active[child1_pos]
                 child2_active = buff_to_active[child2_pos]
@@ -2473,13 +2613,21 @@ class FxFxEWSudakovMixin:
                 onshell_m2 = _m2(onshell_mom_lab)
                 onshell_m = math.sqrt(max(0, onshell_m2))
 
-                # Set mass based on FKS result
+                # Set mass based on FKS result: pole mass only when the mapping
+                # actually reached the pole; the actual invariant mass for EVERY
+                # fallback mode (previously only no_solution/superluminal were
+                # relabelled — the other fallbacks kept the pole label on an
+                # off-pole momentum and crashed check_kinematics_only downstream).
                 fks_method = fks_result.get("method", "")
-                if fks_method in ("fks_fsr_no_solution", "fks_fsr_superluminal"):
-                    mother_p.mass = onshell_m
-                    _dbg("[FORCED]   WARNING: FKS failed even in CM frame, using invariant mass")
-                else:
+                FKS_METHOD_COUNTS[fks_method] += 1
+                forced_methods.append(fks_method)
+                if fks_method in FKS_SUCCESS_METHODS:
                     mother_p.mass = target_mass
+                else:
+                    mother_p.mass = onshell_m
+                    _dbg(
+                        f"[FORCED]   WARNING: FKS mapping fell back ({fks_method}), labelling with invariant mass"
+                    )
 
                 _dbg(
                     f"[FORCED]   On-shell mother: E={onshell_mom_lab.E:.4f}, m={onshell_m:.4f} GeV (target={target_mass:.4f})"
@@ -2543,6 +2691,7 @@ class FxFxEWSudakovMixin:
         _dbg("=" * 70)
         _dbg("")
 
+        buff_event.fks_methods = forced_methods
         return buff_event, groups
 
     # -------------------------------------------------------------------------
@@ -2704,6 +2853,8 @@ class FxFxEWSudakovMixin:
                     if not hasattr(self, "fxfx_clustered_final_states"):
                         self.fxfx_clustered_final_states = set()
                     self.fxfx_clustered_final_states.add(sorted_tag)
+                if not hasattr(event, "fks_methods"):
+                    event.fks_methods = []
                 if return_groups:
                     return (event, sorted_tag, initial_groups)
                 return (event, sorted_tag)
@@ -2720,6 +2871,10 @@ class FxFxEWSudakovMixin:
         ]
         for ip in reversed(to_pop):
             buff_event.pop(ip)
+
+        # Clustering-quality history: seed with any methods recorded by the
+        # MadSpin forced-clustering stage, then append one entry per FxFx step.
+        fks_methods = list(getattr(event, "fks_methods", []))
 
         # Use initial_groups if provided (from forced clustering), otherwise create new
         if initial_groups is not None:
@@ -3094,19 +3249,25 @@ class FxFxEWSudakovMixin:
                 # moth[0]['number'] indicates which particle becomes the mother (1-based)
                 moth_loc = [{"number": keep + 1, "id": moth_id}]
 
-                # Do kinematic reshuffling using FxFx-specific Catani-Seymour method
+                # Do kinematic reshuffling using the FKS mapping
                 try:
-                    fxfx_merge_particles_kinematics(buff_event, a, b, moth_loc)
+                    step_method = fxfx_merge_particles_kinematics(buff_event, a, b, moth_loc)
                 except ValueError as e:
                     if "light-like" in str(e):
                         # Light-like p_clustered = can't boost, stop clustering here
                         _dbg(f"[FXFX]   STOP: {e}")
+                        FKS_QUALITY_COUNTS["clustering_stopped_lightlike"] += 1
                         stop_clustering = True
                         break
                     if "math domain error" in str(e):
-                        _dbg(f"EVENT SKIPPED - kinematic reshuffling failed: {e}")
+                        # NB: the event is NOT dropped — the caller falls back to
+                        # the legacy ickkw=0 scalar Sudakov and the event is
+                        # written to the output as usual.
+                        _dbg(f"[FXFX]   clustering aborted (reshuffling failed: {e}); caller falls back to legacy Sudakov, event kept")
+                        FKS_QUALITY_COUNTS["clustering_aborted_math_domain"] += 1
                         return None
                     raise
+                fks_methods.append(step_method)
 
                 # Update groups
                 if keep == a:
@@ -3136,6 +3297,7 @@ class FxFxEWSudakovMixin:
         _dbg("  END STAGE 2: FxFx clustering complete")
         _dbg("=" * 70)
         _dbg("")
+        buff_event.fks_methods = fks_methods
         if return_groups:
             return buff_event, sorted_tag, groups
         return buff_event, sorted_tag
@@ -3657,9 +3819,21 @@ class FxFxEWSudakovMixin:
         _dbg(f"[SCALAR]   cluster_result = {'EMPTY/None' if not cluster_result else f'OK ({len(cluster_result[0])} particles in event_to_sud)'}")
         if not cluster_result:
             _dbg("[FALLBACK] NO CLUSTERING INFO -> falling back to legacy ickkw=0 _compute_ewsudakov_reweight (NB: legacy lacks 2→1 guard and 3-variant schema)")
+            FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
             return self._compute_ewsudakov_reweight(event, sud_mod)
 
         event_to_sud, _ = cluster_result
+
+        # Fallback policy: the clustering history records how each FSR merge was
+        # mapped; with policy "unit_weight" any event whose history contains a
+        # non-success method is passed through with unit weights.
+        _fks_hist = getattr(event_to_sud, "fks_methods", [])
+        if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
+            FKS_QUALITY_COUNTS["events_with_fsr_fallback"] += 1
+            if FKS_FALLBACK_POLICY == "unit_weight":
+                _dbg(f"[POLICY] FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
+                FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology after clustering (e.g. a single hard parton
         # merged back into the initial state). Kept as belt-and-suspenders for
@@ -3740,6 +3914,7 @@ class FxFxEWSudakovMixin:
         _dbg(f"[5SUD] runaway-damping check: |sudrats[0] central|={abs(sudrats[0]):.3f} (threshold 200)")
         if abs(sudrats[0]) > 200:
             _dbg(f"[5SUD] RUNAWAY DAMPING engaged: |central|={abs(sudrats[0]):.3f} > 200; pre-damping sudrats={sudrats}; setting all 3 to 1.0")
+            FKS_QUALITY_COUNTS["events_runaway_damped_scalar"] += 1
             sudrats = [1.0] * 3
 
         # Final output (matching density path format)
@@ -3825,6 +4000,16 @@ class FxFxEWSudakovMixin:
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         clustered_event, cluster_sorted_tag, groups = cluster_result
+
+        # Fallback policy (see _compute_ewsudakov_fxfx_reweight for the scalar
+        # analogue): unit weights for fallback-tainted events when requested.
+        _fks_hist = getattr(clustered_event, "fks_methods", [])
+        if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
+            FKS_QUALITY_COUNTS["events_with_fsr_fallback_density"] += 1
+            if FKS_FALLBACK_POLICY == "unit_weight":
+                _dbg(f"  -> FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
+                FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
         if self._is_2to1_topology(clustered_event):
@@ -4369,9 +4554,11 @@ class FxFxEWSudakovMixin:
         # Damp overly large ratios
         if abs(weight) > 200:
             _dbg(f"  -> WARNING: weight {weight:.6f} > 200, capping to 1.0")
+            FKS_QUALITY_COUNTS["events_runaway_damped_density"] += 1
             weight = 1.0
         if weight_var is not None and abs(weight_var) > 200:
             _dbg(f"  -> WARNING: weight_var {weight_var:.6f} > 200, capping to 1.0")
+            FKS_QUALITY_COUNTS["events_runaway_damped_density_var"] += 1
             weight_var = 1.0
 
         # Compute the sherpa_qed variant (res[1], sud_mod=0 in the Fortran kernel

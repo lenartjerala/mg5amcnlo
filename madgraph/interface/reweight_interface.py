@@ -683,7 +683,6 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
 
 
         self.lhe_input.seek(0)
-        count_errors = 0
         # Reset event counter for fresh enumeration in Sudakov loop
         fxfx_ewsudakov.CURRENT_EVENT_ID = 0
         for event_nb,event in enumerate(self.lhe_input):
@@ -751,9 +750,13 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                     cross[key] = value / (event_nb+1)
                 
         running_time = misc.format_timer(time.time()-start)
-        logger.info('All event done  (nb_event: %s) %s' % (event_nb+1, running_time))     
+        logger.info('All event done  (nb_event: %s) %s' % (event_nb+1, running_time))
         if self.inc_sudakov:
-            logger.info('Number of events thrown away due to large Sudakov: %s' % str(count_errors))   
+            # Per-run FKS-mapping / clustering-quality accounting. No event is
+            # ever thrown away: fallbacks are counted, and their handling is
+            # controlled by fxfx_ewsudakov.FKS_FALLBACK_POLICY.
+            for line in fxfx_ewsudakov.fks_accounting_summary().splitlines():
+                logger.info(line)
         
         if self.output_type == "default":
             output.write('</LesHouchesEvents>\n')
