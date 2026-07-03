@@ -2630,25 +2630,40 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 self.compile_SubProcess_dir(pdir)
 
 
-    def compile_SubProcess_dir(self, Sdir):
-        """compile a full Subprocess directory"""
+    def compile_SubProcess_dir(self, Sdir, procname=None):
+        """compile a full Subprocess directory.
+
+        procname: if given, passed to make as a command-line override
+        'PROCNAME=<procname>'. This forces a UNIQUE Fortran ME-library soname
+        (liball<procname>_<tag>me.so) and matching DT_NEEDED for this directory.
+        Required for the density modules (rw_me_density_prod / rw_me_density_decay):
+        the makefile's 'PROCNAME= $(notdir $(dir $(abspath $(HERE))))' evaluates to
+        EMPTY (trailing-slash/notdir), so without this every density dir links an
+        identically-named 'liball_<tag>me.so' with an identical DT_SONAME. glibc
+        then satisfies the two extensions' bare-soname DT_NEEDED by matching the
+        FIRST-loaded copy (prod), so the decay extension binds to prod's symbols
+        and get_pdg_order() returns prod's process table -> decay density matrix C
+        fails -> EW-Sudakov reweight silently falls back to scalar. A make CLI
+        assignment overrides the makefile's unconditional '=' (an env var would not,
+        unlike MENUM which the makefile sets only 'ifeq undefined')."""
 
         if self.mother:
             nb_core = self.mother.options['nb_core'] if self.mother.options['run_mode'] !=0 else 1
         else:
             nb_core = 1
+        extra = ['PROCNAME=%s' % procname] if procname else []
         os.environ['MENUM'] = '2'
-        try: 
-            misc.compile(['all_matrix2py.so'], cwd=Sdir, nb_core=nb_core)
+        try:
+            misc.compile(['all_matrix2py.so'] + extra, cwd=Sdir, nb_core=nb_core)
         except Exception as e:
-            misc.compile(['all_matrix2py.so'], cwd=Sdir, nb_core=1)
+            misc.compile(['all_matrix2py.so'] + extra, cwd=Sdir, nb_core=1)
 
         if not (self.second_model or self.second_process or self.dedicated_path):
             os.environ['MENUM'] = '3'
             try:
-                misc.compile(['all_matrix3py.so'], cwd=Sdir, nb_core=nb_core)
+                misc.compile(['all_matrix3py.so'] + extra, cwd=Sdir, nb_core=nb_core)
             except Exception as e:
-                misc.compile(['all_matrix3py.so'], cwd=Sdir, nb_core=1)
+                misc.compile(['all_matrix3py.so'] + extra, cwd=Sdir, nb_core=1)
 
 
     def _compile_density_subprocesses(self):
@@ -2661,7 +2676,13 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             if not os.path.isdir(sub_dir):
                 continue
             logger.info('Compiling density modules in %s', sub_dir)
-            self.compile_SubProcess_dir(sub_dir)
+            # Pass a UNIQUE PROCNAME so prod/decay build distinct ME-lib sonames
+            # (liball<dir_name>_<tag>me.so). Without this both link an identical
+            # 'liball_<tag>me.so'; glibc's soname dedup then makes the second-loaded
+            # density module bind to the first's Fortran symbols (decay -> prod),
+            # so decay get_pdg_order() is wrong and the decay density matrix C
+            # lookup fails. See compile_SubProcess_dir docstring.
+            self.compile_SubProcess_dir(sub_dir, procname=dir_name)
 
     def load_density_modules(self):
         """Load density matrix modules from the dedicated density directories."""
@@ -2732,7 +2753,14 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         hel_dict = {}
         for prefix in prefix_set:
             if hasattr(mymod, '%sprocess_nhel' % prefix):
-                nhel = getattr(mymod, '%sprocess_nhel' % prefix).nhel
+                # Transfer nhel from the Fortran common block into the f2py wrapper,
+                # then read the PREFIXED member (e.g. m0_process_nhel.m0_nhel). The bare
+                # `.nhel` does NOT exist on the f2py common-block object -> AttributeError
+                # ('fortran' object has no attribute 'nhel'). Matches the canonical
+                # scalar/virtual loader below; verified against the density ME's f2py
+                # symbols (m0_get_nhel_entry, m0_process_nhel.m0_nhel).
+                getattr(mymod, '%sget_nhel_entry' % prefix)()
+                nhel = getattr(getattr(mymod, '%sprocess_nhel' % prefix), '%snhel' % prefix)
                 hel_dict[prefix] = {}
                 for i, onehel in enumerate(zip(*nhel)):
                     hel_dict[prefix][tuple(onehel)] = i + 1

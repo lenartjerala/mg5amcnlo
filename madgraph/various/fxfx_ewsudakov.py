@@ -1695,16 +1695,46 @@ class DensityHelper:
                 _dbg("[DensityHelper] WARNING: Card_dir does not exist!")
             self._initialized_modules.add(module_id)
 
-        # Call GET_DENSITY via F2PY
+        # Call GET_DENSITY via F2PY.
+        # Two module conventions exist:
+        #   (legacy)  per-subprocess symbol  <prefix>get_density(p, pos, n_changing, allow_hel, n_comb, alphas)
+        #   (current) unified dispatcher       py_get_density(pdgs, procid, p, pos, allow_hel, alphas, scale2)
+        #             -> F77_DENSITY selects the subprocess by matching PDGS when procid <= 0.
+        #             MG5 3.8.1 f2py signature (f2py_wrapper_all.inc): n_comb, n_changing and
+        #             npdg are hidden and inferred from len(allow_hel)/len(pos), len(pos), len(pdgs).
+        # Older density modules (e.g. ttHj) f2py-exported the per-process symbol; the current
+        # MG5 f2py wrapper (write_density_matrix_wrapper) exports ONLY the dispatcher.
+        # Try per-process first (backward-compat), then fall back to the dispatcher.
         func_name = prefix + "get_density"
         get_density_func = getattr(module, func_name, None)
-        _dbg(f"[DensityHelper] Looking for function: {func_name} in module {module}")
+        use_density_dispatcher = False
+        if get_density_func is not None:
+            _dbg(f"[DensityHelper] Using per-process density function: {func_name}")
+        else:
+            get_density_func = getattr(module, "py_get_density", None)
+            use_density_dispatcher = True
+            _dbg(
+                f"[DensityHelper] {func_name} absent; using unified dispatcher py_get_density "
+                f"(present={get_density_func is not None})"
+            )
         if get_density_func is None:
-            _dbg(f"[DensityHelper] Function {func_name} not found in module")
+            _dbg(
+                f"[DensityHelper] No density entry point found (neither {func_name} nor py_get_density)"
+            )
             _dbg(
                 f"[DensityHelper] Available functions: {[f for f in dir(module) if 'get_density' in f.lower()]}"
             )
             return None
+
+        # Arguments needed only by the unified dispatcher.
+        # PDGS must be in the SAME order as the momenta (orig_order = (incoming, outgoing));
+        # procid <= 0 makes F77_DENSITY select the subprocess purely by PDGS matching.
+        # This mirrors the proven standard-reweight call at
+        # reweight_interface.py:1840  ->  smatrixhel(pdg, pid=-1, ...).
+        density_pdgs = np.asarray(
+            list(orig_order[0]) + list(orig_order[1]), dtype=np.int32
+        )
+        density_procid = -1
 
         me_value = None
         _dbg(
@@ -1739,14 +1769,30 @@ class DensityHelper:
                 _dbg(
                     f"[DensityHelper] p_sum (FS-IS): E={p_sum[0]:.4f}, px={p_sum[1]:.4f}, py={p_sum[2]:.4f}, pz={p_sum[3]:.4f}"
                 )
-            production_matrix = get_density_func(
-                pinv,
-                pos_arr,
-                self.number_changing_helicities,
-                hel_arr,
-                self.number_combinations,
-                event.aqcd,
-            )
+            if use_density_dispatcher:
+                # py_get_density(pdgs, procid, p, pos, allow_hel, alphas, scale2): the
+                # MG5 3.8.1 signature. n_comb is inferred as len(allow_hel)/len(pos),
+                # which equals number_combinations for the flat allowed-helicity array.
+                # scale2 is the event scale squared, as in reweight_interface's own
+                # density call (a dummy argument for LO matrix elements).
+                production_matrix = get_density_func(
+                    density_pdgs,
+                    density_procid,
+                    pinv,
+                    pos_arr,
+                    hel_arr,
+                    event.aqcd,
+                    event.scale ** 2,
+                )
+            else:
+                production_matrix = get_density_func(
+                    pinv,
+                    pos_arr,
+                    self.number_changing_helicities,
+                    hel_arr,
+                    self.number_combinations,
+                    event.aqcd,
+                )
             _dbg(
                 f"[DensityHelper] Fortran returned, production_matrix type={type(production_matrix)}"
             )
@@ -3973,7 +4019,7 @@ class FxFxEWSudakovMixin:
         # Initialize logger for diagnostics
         density_logger = getattr(self, "_density_logger", None)
         if density_logger is None:
-            density_logger = DensitySudakovLogger(verbose=getattr(self, "density_verbose", False))
+            density_logger = DensitySudakovLogger(verbose=getattr(self, "density_verbose", True))  # default flipped True 2026-06-19 (full debug; revert with the file)
             self._density_logger = density_logger
 
         # PASS-THROUGH: 2→1 raw topology (qq̄ → resonance, no real radiation) —
@@ -4535,9 +4581,14 @@ class FxFxEWSudakovMixin:
                 res = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
                 born, sud_weak = res[0], res[2]
                 weight = 1.0 + sud_weak / born if abs(born) > 1e-30 else 1.0
-                weight_var = None  # No variation for scalar fallback
+                # s_to_rij_off variant: the scalar ewsudakov() call already returns
+                # res[3] (NLL Sudakov with s_to_rij=OFF). Mirror the 5SUD path
+                # (~line 3762) instead of leaving the 21/26/31XX column hardcoded to
+                # 1.0, which read as a (false) zero s_to_rij scheme uncertainty.
+                weight_var = (1.0 + res[3] / born) if abs(born) > 1e-30 else 1.0
                 _dbg(f"     born={born:.6e}, sud_weak={sud_weak:.6e}")
                 _dbg(f"     weight = 1 + sud_weak/born = {weight:.6f}")
+                _dbg(f"     weight_var = 1 + res[3]/born = {weight_var:.6f}  (s_to_rij_off)")
 
             # Log event processing
             density_logger.log_event(

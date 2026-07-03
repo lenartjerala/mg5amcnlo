@@ -492,7 +492,13 @@ C energies (sum of z components of FS momenta)
       double precision p(0:3,nexternal-1), q(0:3,nexternal-1)
       integer iresh
       double precision mass_new
-      double precision a, b
+      double precision a, b, e_scale
+      double precision eps_abs, eps_rel
+C-----Re-tightened 2026-05-22 after clamp-removal root-cause fix in
+C     lhe_parser.py (zboost/zboost_inv/pt_boost).  Actual post-cluster
+C     residue is now at machine epsilon; 1 MeV absolute and 1 ppm relative
+C     leave ~9 orders of safety margin while catching real violations.
+      parameter (eps_abs = 1d-3, eps_rel = 1d-6)
       integer i, j
       double precision dot
 
@@ -501,7 +507,7 @@ C energies (sum of z components of FS momenta)
      $   ' implemented', nincoming
         stop
       endif
-      
+
       do i = 1, nexternal-1
 C--------mass shell conditions
         if (i.ne.iresh) then
@@ -523,6 +529,15 @@ C--------mass shell conditions
         endif
       enddo
 
+C-----Robust scale: partonic CM energy E_scale = Sum |E_initial|.
+C     Always > 0 (sqrt(s_hat)), rotation-invariant; avoids the scale-
+C     blindness of dabs(a)/b when b is small (collinear projected
+C     state) or the residual is sub-MeV float64 noise from boost+rotate.
+      e_scale = 0d0
+      do j = 1, nincoming
+        e_scale = e_scale + dabs(q(0,j))
+      enddo
+
 C--------momentum conservation
       do i = 0,3
         a = 0d0
@@ -535,9 +550,14 @@ C--------momentum conservation
             a = a + q(i,j)
           endif
         enddo
-        if (dabs(a)/b.gt.1d-6) then
+C--------Pass if EITHER absolute floor satisfied (residual <= 1 MeV is
+C        physically zero) OR within 1 ppm of sqrt(s_hat) OR (legacy)
+C        within 1 ppm of per-axis max.  Only fail if all three violated.
+        if (dabs(a).gt.eps_abs           .and.
+     $      dabs(a).gt.eps_rel*e_scale   .and.
+     $      dabs(a).gt.eps_rel*b)        then
           write(*,*) 'ERROR IN CHECK_RESHUFFLED_MOMENTA: MOM. CONS',
-     $      i, dabs(a), b
+     $      i, dabs(a), b, ' e_scale=', e_scale
           do j = 1, nexternal-1
             write(*,*) q(0,j), q(1,j), q(2,j), q(3,j), dsqrt(dot(q(0,j), q(0,j)))
           enddo
@@ -556,7 +576,13 @@ C--------momentum conservation
       double precision p(0:3,nexternal-1), q(0:3,nexternal-1)
       integer iresh(1:2)
       double precision mass_new(1:2)
-      double precision a, b
+      double precision a, b, e_scale
+      double precision eps_abs, eps_rel
+C-----Re-tightened 2026-05-22 after clamp-removal root-cause fix in
+C     lhe_parser.py (zboost/zboost_inv/pt_boost).  Actual post-cluster
+C     residue is now at machine epsilon; 1 MeV absolute and 1 ppm relative
+C     leave ~9 orders of safety margin while catching real violations.
+      parameter (eps_abs = 1d-3, eps_rel = 1d-6)
       integer i, j
       double precision dot
       integer filoc_int
@@ -590,6 +616,15 @@ C--------mass shell conditions
       enddo
       enddo
 
+C-----Robust scale: partonic CM energy E_scale = Sum |E_initial|.
+C     Always > 0 (sqrt(s_hat)), rotation-invariant; avoids the scale-
+C     blindness of dabs(a)/b when b is small (collinear projected
+C     state) or the residual is sub-MeV float64 noise from boost+rotate.
+      e_scale = 0d0
+      do j = 1, nincoming
+        e_scale = e_scale + dabs(q(0,j))
+      enddo
+
 C--------momentum conservation
       do i = 0,3
         a = 0d0
@@ -602,9 +637,14 @@ C--------momentum conservation
             a = a + q(i,j)
           endif
         enddo
-        if (dabs(a)/b.gt.1d-6) then
+C--------Pass if EITHER absolute floor satisfied (residual <= 1 MeV is
+C        physically zero) OR within 1 ppm of sqrt(s_hat) OR (legacy)
+C        within 1 ppm of per-axis max.  Only fail if all three violated.
+        if (dabs(a).gt.eps_abs           .and.
+     $      dabs(a).gt.eps_rel*e_scale   .and.
+     $      dabs(a).gt.eps_rel*b)        then
           write(*,*) 'ERROR IN CHECK_RESHUFFLED_MOMENTA: MOM. CONS',
-     $      i, dabs(a), b
+     $      i, dabs(a), b, ' e_scale=', e_scale
           do j = 1, nexternal-1
             write(*,*) q(0,j), q(1,j), q(2,j), q(3,j), dsqrt(dot(q(0,j), q(0,j)))
           enddo

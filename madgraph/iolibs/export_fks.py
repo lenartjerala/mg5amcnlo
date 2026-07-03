@@ -3252,7 +3252,13 @@ Parameters              %(params)s\n\
 
         # Extract color data lines
         color_data_lines = self.get_color_data_lines(matrix_element)
-        replace_dict['color_data_lines'] = "\n".join(color_data_lines)
+        # get_color_data_lines emits "%(proc_prefix)s" placeholders meant for a
+        # second substitution pass; every other Sudakov-ME writer applies it
+        # (write_sudakov_me:~3534 and ~2059/2692/2793). The goldstone writer was
+        # missing it, so raw %(proc_prefix)s leaked into ewsudakov_goldstone_me_*.f
+        # -> "Syntax error in DATA statement" for the first process that produces
+        # a Goldstone ME (e.g. charged WW). Match the siblings.
+        replace_dict['color_data_lines'] = "\n".join(color_data_lines) % {'proc_prefix': ''}
 
         # Extract helas calls of the base  matrix element
         helas_calls = fortran_model.get_matrix_element_calls(\
