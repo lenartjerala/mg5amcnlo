@@ -550,6 +550,19 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         # topology closest to the original event, which is already in the standalone
         # library. Without this, a scan with min(ξ) < default 1.5 could produce
         # per-event topologies the catalog never saw, triggering KeyError fallback.
+        # A second pass over this module's own output would key all old
+        # 20XX/21XX/22XX variants by the same two-digit suffix and compound a
+        # previous correction into the new one.  Refuse that input up front.
+        if (
+            self.inc_sudakov
+            and "initrwgt" in self.banner
+            and "_sud" in self.banner["initrwgt"]
+        ):
+            raise Exception(
+                "Input LHE banner already declares EW-Sudakov weights "
+                "('_sud' labels in <initrwgt>): refusing to reweight twice. "
+                "Start again from the pre-reweighting event file."
+            )
         if self.inc_sudakov and self.sudakov_xi_scan:
             self.mW2_cluster_scale = min(self.sudakov_xi_scan)
         self._ensure_fxfx_cluster_catalogue()
@@ -691,6 +704,19 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         for event_nb,event in enumerate(self.lhe_input):
             # Set current event ID for debug printouts (1-based to match user expectations)
             fxfx_ewsudakov.CURRENT_EVENT_ID = event_nb + 1
+            if event_nb == 0 and self.inc_sudakov:
+                prior_sudakov = [
+                    key
+                    for key in event.parse_reweight()
+                    if fxfx_ewsudakov.is_prior_sudakov_id(key)
+                ]
+                if prior_sudakov:
+                    raise Exception(
+                        "First event already carries EW-Sudakov weight "
+                        "columns %s: refusing to reweight twice. Start from "
+                        "the pre-reweighting file."
+                        % sorted(prior_sudakov)[:6]
+                    )
             #control logger
             if (event_nb % max(int(10**int(math.log10(float(event_nb)+1))),10)==0):
                     running_time = misc.format_timer(time.time()-start)
@@ -1383,6 +1409,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             base_prefix = 20 + 5 * xi_idx
             rwgt_dict_new = {'orig': orig_wgt} if xi_idx == 0 else {}
             for el in rwgt_dict:
+                if fxfx_ewsudakov.is_prior_sudakov_id(el):
+                    continue
                 ending = el[-2:]
                 for v in range(5):
                     rwgt_dict_new['%d%s' % (base_prefix + v, ending)] = rwgt_dict[el]
@@ -1577,6 +1605,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         sudrats = [sudrat1, sudrat2, sudrat0, sudrat3, sudrat4]
         rwgt_dict_new = {'orig': orig_wgt} if xi_idx == 0 else {}
         for el in rwgt_dict:
+            if fxfx_ewsudakov.is_prior_sudakov_id(el):
+                continue
             ending = el[-2:]
             for variant_idx, w in enumerate(sudrats):
                 tag = '%d%s' % (base_prefix + variant_idx, ending)

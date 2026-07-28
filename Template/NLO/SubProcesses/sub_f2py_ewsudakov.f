@@ -248,6 +248,14 @@ C-----
 C  BEGIN CODE
 C-----
 
+C     Validate nres before any diagnostic or computational loop indexes the
+C     fixed-size resonance arrays.
+      if (nres.lt.0 .or. nres.gt.MAX_RES) then
+        write (*,*) 'ERROR in density_sudakov_py: nres=', nres
+        write (*,*) ' exceeds MAX_RES=', MAX_RES
+        stop 1
+      endif
+
 C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       deb_settozero = 0
       if (density_dbg .ne. 0) then
@@ -285,6 +293,17 @@ C     Initialize outputs
       do i = 1, nres
         total_dim = total_dim * res_dims(i)
       enddo
+
+C     Guard the fixed-size buffers: density_delta/born_diag are MAX_DIM
+C     and allow_hel in the density wrapper is 300 (indexed up to
+C     total_dim*nres). Oversize would be a silent overrun through the
+C     assumed-size dummies, so stop loudly instead.
+      if (total_dim.gt.MAX_DIM .or. total_dim*nres.gt.300) then
+        write (*,*) 'ERROR in density_sudakov_py: helicity space too'
+        write (*,*) ' large: total_dim=', total_dim, ' nres=', nres
+        write (*,*) ' caps: MAX_DIM=', MAX_DIM, ' allow_hel=300'
+        stop 1
+      endif
 
       do i = 1, MAX_DIM * (MAX_DIM + 1) / 2
         density_born(i) = dcmplx(0d0, 0d0)
@@ -353,4 +372,3 @@ C     Note: density_born and born_diag are recomputed but should be identical
 
       return
       end
-

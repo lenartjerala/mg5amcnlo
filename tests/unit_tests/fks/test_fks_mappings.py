@@ -471,6 +471,120 @@ class TestDecayTransform(unittest.TestCase):
         self.assertAlmostEqual(out[0].E, d1.E, places=9)
         self.assertAlmostEqual(out[1].pz, d2.pz, places=9)
 
+    def test_decay_follows_prepared_frame_without_wigner_rotation(self):
+        # A longitudinal event-frame boost is non-collinear with this W.  With
+        # zero mass shift the decay transport must reduce exactly to that same
+        # frame boost; mixing lab daughters with the prepared mother instead
+        # produces the spurious Wigner rotation fixed by B2.
+        mass = fx.MW_POLE
+        w_lab = FourMomentum(
+            [math.sqrt(mass**2 + 60.0**2 + 150.0**2), 60.0, 0.0, 150.0]
+        )
+        direction = (0.3, 0.8, math.sqrt(1.0 - 0.3**2 - 0.8**2))
+        d1_rest = FourMomentum(
+            [
+                mass / 2.0,
+                mass / 2.0 * direction[0],
+                mass / 2.0 * direction[1],
+                mass / 2.0 * direction[2],
+            ]
+        )
+        d2_rest = FourMomentum(
+            [
+                mass / 2.0,
+                -mass / 2.0 * direction[0],
+                -mass / 2.0 * direction[1],
+                -mass / 2.0 * direction[2],
+            ]
+        )
+        w_p = math.sqrt(w_lab.px**2 + w_lab.py**2 + w_lab.pz**2)
+        w_dir = (w_lab.px / w_p, w_lab.py / w_p, w_lab.pz / w_p)
+        daughters_lab = [
+            fx._boost_along_direction(d1_rest, -w_p / w_lab.E, w_dir),
+            fx._boost_along_direction(d2_rest, -w_p / w_lab.E, w_dir),
+        ]
+
+        # beta_z = 0.55, in the exact Event.boost convention recorded by the
+        # preparation routine.
+        frame_transform = [
+            ("boost_to_cm", FourMomentum([1000.0, 0.0, 0.0, 550.0]))
+        ]
+        w_prepared = fx._apply_fxfx_frame_transform(w_lab, frame_transform)
+        expected = [
+            fx._apply_fxfx_frame_transform(p, frame_transform)
+            for p in daughters_lab
+        ]
+        transformed = fx._transform_decay_products_to_onshell(
+            daughters_lab,
+            w_lab,
+            w_prepared,
+            frame_transform=frame_transform,
+        )
+
+        for got, want in zip(transformed, expected):
+            for component in ("E", "px", "py", "pz"):
+                self.assertAlmostEqual(
+                    getattr(got, component), getattr(want, component), places=10
+                )
+
+        # Pin the regression: the old mixed-frame call is measurably different
+        # despite conserving the total four-momentum.
+        mixed_frame = fx._transform_decay_products_to_onshell(
+            daughters_lab, w_lab, w_prepared
+        )
+        self.assertGreater(
+            max(
+                abs(getattr(mixed_frame[0], component) - getattr(expected[0], component))
+                for component in ("E", "px", "py", "pz")
+            ),
+            1.0e-3,
+        )
+
+
+class TestDensityKernelLimits(unittest.TestCase):
+    def test_fixed_buffer_limits(self):
+        self.assertTrue(fx.density_dimensions_supported(9, 2))
+        self.assertTrue(fx.density_dimensions_supported(36, 4))
+        self.assertFalse(fx.density_dimensions_supported(81, 4))
+        self.assertFalse(fx.density_dimensions_supported(36, 9))
+        self.assertFalse(fx.density_dimensions_supported(1, 11))
+
+
+class TestSudakovSourceFiltering(unittest.TestCase):
+    def test_prior_sudakov_columns_are_not_compounded(self):
+        class FakeEvent(object):
+            wgt = 2.0
+
+            @staticmethod
+            def parse_reweight():
+                return {
+                    "1001": 2.0,
+                    "2001": 200.0,
+                    "2101": 210.0,
+                    "2201": 220.0,
+                }
+
+        dummy = type(
+            "DummyMixin",
+            (),
+            {
+                "_current_xi_idx": 0,
+                "SUDAKOV_VARIANT_NAMES":
+                    fx.FxFxEWSudakovMixin.SUDAKOV_VARIANT_NAMES,
+            },
+        )()
+        weights = [1.1, 0.9, 1.05]
+        result = fx.FxFxEWSudakovMixin._build_sudakov_rwgt_dict(
+            dummy, FakeEvent(), weights
+        )
+
+        self.assertEqual(set(result), {"orig", "2001", "2101", "2201"})
+        self.assertAlmostEqual(result["2001"], 2.0 * weights[0])
+        self.assertAlmostEqual(result["2101"], 2.0 * weights[1])
+        self.assertAlmostEqual(result["2201"], 2.0 * weights[2])
+        self.assertTrue(fx.is_prior_sudakov_id("2001"))
+        self.assertFalse(fx.is_prior_sudakov_id("1001"))
+
 
 class TestForcedClusteringPlumbing(unittest.TestCase):
     """_apply_forced_clustering: fks_methods threading, conditional mass rule,

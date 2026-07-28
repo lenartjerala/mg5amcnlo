@@ -25,6 +25,7 @@ The main class FxFxEWSudakovMixin is designed to be mixed into ReweightInterface
 from __future__ import division
 
 import copy
+import logging
 import math
 import os
 import re
@@ -42,6 +43,7 @@ import numpy as np
 
 # Convenience alias for FourMomentum
 FourMomentum = lhe_parser.FourMomentum
+logger = logging.getLogger("madgraph.various.fxfx_ewsudakov")
 
 # =============================================================================
 # Module-level debug flag and function
@@ -50,6 +52,34 @@ DEBUG = False
 
 # Event counter set by reweight_interface.py during event loop (1-based)
 CURRENT_EVENT_ID = 0
+
+# Weight IDs emitted by this module have a two-digit prefix in 20..99 and
+# inherit the final two digits of their source weight.  Never use those
+# columns as sources on a later pass: doing so compounds a previous Sudakov
+# correction and, because IDs are keyed only by suffix, cross-contaminates the
+# central and variation columns.
+_PRIOR_SUDAKOV_ID = re.compile(r"^[2-9]\d{3}$")
+_PRIOR_SUD_WARNED = False
+_DIM_OVERFLOW_WARNED = False
+
+# Fixed dimensions in the generated density dispatcher/Fortran wrapper.
+MAX_DENSITY_DIM = 36
+MAX_DENSITY_RESONANCES = 10
+MAX_DENSITY_ALLOW_HEL = 300
+
+
+def is_prior_sudakov_id(key):
+    """Return whether *key* is in this module's 20XX--99XX output space."""
+    return bool(_PRIOR_SUDAKOV_ID.match(str(key)))
+
+
+def density_dimensions_supported(total_dim, nres):
+    """Return whether a density call fits every fixed generated buffer."""
+    return (
+        total_dim <= MAX_DENSITY_DIM
+        and nres <= MAX_DENSITY_RESONANCES
+        and total_dim * nres <= MAX_DENSITY_ALLOW_HEL
+    )
 
 # =============================================================================
 # FKS-mapping accounting and fallback policy
@@ -506,28 +536,69 @@ def _boost_along_direction(p, beta, direction):
     )
 
 
+def _apply_fxfx_frame_transform(momentum, frame_transform):
+    """Apply the boost/rotation recorded by _prepare_fxfx_sudakov_inputs.
+
+    Event.boost uses the HELAS boost convention: it negates the spatial part
+    of the total incoming momentum before calling FourMomentum.boost.  Mirror
+    that implementation exactly so decay products can follow the same Lorentz
+    map as the clustered production event.
+    """
+    transformed = FourMomentum(momentum)
+    for operation, reference in frame_transform or []:
+        if operation == "boost_to_cm":
+            pboost = FourMomentum(reference)
+            pboost.px *= -1.0
+            pboost.py *= -1.0
+            pboost.pz *= -1.0
+            transformed = transformed.boost(pboost)
+        elif operation == "rotate_to_z":
+            transformed = transformed.rotate_to_z(prot=FourMomentum(reference))
+        else:
+            raise ValueError("Unknown FxFx frame operation: %s" % operation)
+    return transformed
+
+
 def _transform_decay_products_to_onshell(
-    decay_momenta, original_res_p4, onshell_res_p4,
+    decay_momenta, original_res_p4, onshell_res_p4, frame_transform=None,
 ):
     """
     Transform decay products from original (off-shell) resonance kinematics
     to on-shell resonance kinematics.
 
     Algorithm (scaling):
-    1. Boost decay products to original resonance rest frame
-    2. Scale momenta to match on-shell mass
-    3. Boost from on-shell rest frame to lab frame
+    1. Apply the production event's lab -> prepared-frame Lorentz map
+    2. Boost decay products to the transformed original resonance rest frame
+    3. Scale momenta to match on-shell mass
+    4. Boost from on-shell rest frame to the prepared frame
 
     Args:
         decay_momenta: List of FourMomentum for decay products
         original_res_p4: Original resonance 4-momentum (off-shell, from original event)
         onshell_res_p4: On-shell resonance 4-momentum (from FKS-clustered event)
+        frame_transform: Ordered boost/rotation operations recorded while
+            preparing the clustered production event.  If supplied, the
+            original decay system is transported with that same Lorentz map
+            before the on-shell adjustment.
 
     Returns:
         List of transformed FourMomentum for decay products (same order as input)
     """
     if not decay_momenta:
         return []
+
+    # The on-shell mother already lives in the prepared partonic-CM frame.
+    # Move the original lab-frame decay system into that frame with the exact
+    # same Lorentz map first.  Without this step the two rest-frame boosts use
+    # non-collinear axes in different coordinate frames, introducing a
+    # spurious Wigner rotation even when there is no mass reshuffling.
+    if frame_transform:
+        decay_momenta = [
+            _apply_fxfx_frame_transform(p, frame_transform) for p in decay_momenta
+        ]
+        original_res_p4 = _apply_fxfx_frame_transform(
+            original_res_p4, frame_transform
+        )
 
     n_particles = len(decay_momenta)
 
@@ -3572,6 +3643,8 @@ class FxFxEWSudakovMixin:
         """Prepare FxFx Sudakov inputs (kinematics + canonical ordering)."""
         _dbg("[FXFX] _prepare_fxfx_sudakov_inputs: start")
         _dbg(f"[FXFX]   event_to_sud particles={len(event_to_sud)}")
+        frame_transform = []
+
         # Boost to CM frame if needed
         p_in_sum = lhe_parser.FourMomentum()
         for part in event_to_sud:
@@ -3584,12 +3657,14 @@ class FxFxEWSudakovMixin:
         )
         _dbg(f"[FXFX]   boost needed={needs_boost} (p_in_sum={p_in_sum})")
         if needs_boost:
+            frame_transform.append(("boost_to_cm", FourMomentum(p_in_sum)))
             event_to_sud.boost(p_in_sum)
 
         # Rotate so initial-state particle is along z-axis (matches ickkw=0 path)
         initial = copy.deepcopy(event_to_sud[0])
         if not ((abs(initial.px) < 1e-6 * initial.E) and (abs(initial.py) < 1e-6 * initial.E)):
             _dbg(f"[FXFX]   rotating to z-axis (initial px={initial.px}, py={initial.py})")
+            frame_transform.append(("rotate_to_z", FourMomentum(initial)))
             for p in event_to_sud:
                 p.set_momentum(
                     lhe_parser.FourMomentum(p).rotate_to_z(prot=lhe_parser.FourMomentum(initial))
@@ -3675,6 +3750,10 @@ class FxFxEWSudakovMixin:
             "iflist": iflist,
             "pdg_order": pdg_order,
             "perm": perm,  # Permutation from LHE order to canonical MG5 order (final-state only)
+            # Lorentz operations applied before the non-Lorentz mass
+            # normalisations/reordering.  The decay system must follow these
+            # operations before its on-shell adjustment.
+            "frame_transform": frame_transform,
         }
 
     def _get_fxfx_ewsudpy_module(self, sud_mod, sorted_tag):
@@ -3885,7 +3964,19 @@ class FxFxEWSudakovMixin:
         rwgt_dict_new = {"orig": event.wgt} if xi_idx == 0 else {}
         _dbg(f"[WEIGHT]   xi_idx={xi_idx} -> {'INCLUDING' if xi_idx == 0 else 'SKIPPING'} 'orig' key")
         _dbg(f"[WEIGHT] Expanding {len(rwgt_dict)} source keys × 3 variants:")
+        prior_sudakov = [key for key in rwgt_dict if is_prior_sudakov_id(key)]
+        if prior_sudakov:
+            global _PRIOR_SUD_WARNED
+            if not _PRIOR_SUD_WARNED:
+                logger.warning(
+                    "Input events already carry EW-Sudakov columns %s; "
+                    "excluding them as sources to prevent compounded weights.",
+                    sorted(prior_sudakov)[:6],
+                )
+                _PRIOR_SUD_WARNED = True
         for el in rwgt_dict:
+            if is_prior_sudakov_id(el):
+                continue
             ending = el[-2:]
             _dbg(f"[WEIGHT]   source key '{el}' (ending='{ending}', base_value={rwgt_dict[el]:.6e})")
             for variant_idx, w in enumerate(weights):
@@ -4190,6 +4281,28 @@ class FxFxEWSudakovMixin:
         # The density matrix formalism requires at least one true resonance with decay products
         if not resonances:
             _dbg("  -> NO RESONANCES found, falling back to scalar FxFx path")
+            return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
+
+        # The generated dispatcher/Fortran density kernel uses fixed buffers:
+        # density_delta/born_diag(36), res arrays(10), and allow_hel(300).
+        # Calling it outside those bounds is a silent assumed-size Fortran
+        # overrun, so degrade safely to the polarisation-summed scalar lane.
+        if not density_dimensions_supported(total_dim, len(resonances)):
+            if _FKS_COUNT_ACTIVE:
+                FKS_QUALITY_COUNTS["events_density_dim_overflow"] += 1
+            global _DIM_OVERFLOW_WARNED
+            if not _DIM_OVERFLOW_WARNED:
+                logger.warning(
+                    "Resonance-helicity space too large for the density kernel "
+                    "(total_dim=%d, nres=%d; caps %d/%d/%d): falling back "
+                    "to the scalar Sudakov path.",
+                    total_dim,
+                    len(resonances),
+                    MAX_DENSITY_DIM,
+                    MAX_DENSITY_RESONANCES,
+                    MAX_DENSITY_ALLOW_HEL,
+                )
+                _DIM_OVERFLOW_WARNED = True
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         # Step 2b: Define B and C from clustering history (no density evaluation yet)
@@ -4577,7 +4690,12 @@ class FxFxEWSudakovMixin:
                         )
 
                     # Get decay density matrix
-                    C = self._get_decay_density_matrix(event, clustered_event, resonances)
+                    C = self._get_decay_density_matrix(
+                        event,
+                        clustered_event,
+                        resonances,
+                        frame_transform=prep.get("frame_transform"),
+                    )
                     if C is not None:
                         _dbg("=" * 70)
                         _dbg("     DECAY DENSITY MATRIX C")
@@ -4737,7 +4855,9 @@ class FxFxEWSudakovMixin:
     # Decay Density Matrix Methods
     # =========================================================================
 
-    def _get_decay_density_matrix(self, full_event, clustered_event, resonances):
+    def _get_decay_density_matrix(
+        self, full_event, clustered_event, resonances, frame_transform=None
+    ):
         """
         Build decay density matrix C from event information.
 
@@ -4768,7 +4888,12 @@ class FxFxEWSudakovMixin:
                 continue
 
             decay_event = self._build_decay_event_from_cluster(
-                full_event, clustered_event, res_idx, res_pdg, decay_lhe
+                full_event,
+                clustered_event,
+                res_idx,
+                res_pdg,
+                decay_lhe,
+                frame_transform=frame_transform,
             )
             try:
                 decay_tag, decay_order = decay_event.get_tag_and_order()
@@ -4798,7 +4923,13 @@ class FxFxEWSudakovMixin:
         return result
 
     def _build_decay_event_from_cluster(
-        self, full_event, clustered_event, res_idx, res_pdg, decay_lhe
+        self,
+        full_event,
+        clustered_event,
+        res_idx,
+        res_pdg,
+        decay_lhe,
+        frame_transform=None,
     ):
         """
         Build a minimal decay event (resonance -> clustered decay products).
@@ -4856,7 +4987,10 @@ class FxFxEWSudakovMixin:
 
         # Transform decay products to match on-shell resonance
         transformed_momenta = _transform_decay_products_to_onshell(
-            original_momenta, original_res_p4, onshell_res_p4
+            original_momenta,
+            original_res_p4,
+            onshell_res_p4,
+            frame_transform=frame_transform,
         )
 
         # Build resonance particle (initial state for decay)

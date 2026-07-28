@@ -306,7 +306,10 @@ class DensityMatrixObservables(list):
         This function converts a hermitian matrix expressed as a line into a typical matrix form.
         Input: hermitian matrix in a line form or matrix form
         Output: hermitian matrix in the traditional square form
-        Caution! The definition of matrices in fortran and python are not the same.
+        The Fortran GET_INTER routines store the upper triangle in row-major
+        helicity order as B[i,k] = M_i * conj(M_k), for i <= k.  Keep that
+        triangle as stored and obtain the lower triangle by Hermitian
+        conjugation.
         """
         if self.square_or_line_or_string() == 'square':
             return self.density_matrix
@@ -323,7 +326,7 @@ class DensityMatrixObservables(list):
             for i in range(n):
                     for k in range(n):
                             if k > i:
-                                    matrix_square[i][k] = np.conjugate(self.density_matrix[i*n + k - i*(i + 1)//2]) 
+                                    matrix_square[i][k] = self.density_matrix[i*n + k - i*(i + 1)//2]
                             elif k == i:
                                     matrix_square[i][k] = self.density_matrix[i*n + k - i*(i + 1)//2] #this line is just here because the diagonal elements should not be conjugated (they are real anyway)
                             else:
