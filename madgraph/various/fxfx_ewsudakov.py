@@ -3079,17 +3079,44 @@ class FxFxEWSudakovMixin:
                     return k
             return None
 
+        def _group_momentum_labels(grp):
+            """LHE labels whose ORIGINAL momenta add up to this object's momentum.
+
+            The forced-clustering stage keeps a restored resonance's own LHE
+            index in its group alongside the children it was rebuilt from,
+            because downstream consumers need that index to identify the decay
+            system (see the group_lhe/decay_lhe bookkeeping in the density
+            path).  Summing every member would therefore count the resonance
+            twice: a reversed W -> l nu group would contribute 2 p_W, and a
+            nested t -> b W(-> l nu) group 2 p_t + p_W, inflating every pair
+            invariant that contains a resonance by a factor between 2 and 4 and
+            letting such pairs pass the threshold below unconditionally.  Sum
+            the decay products instead by dropping any status=2 member whenever
+            the group also carries non-intermediate ones, which handles the
+            nested case in one pass.  A group made only of intermediates (a
+            resonance whose recorded decay was not reversed) keeps its own
+            entry, and labels outside the original event are left untouched so
+            that a stale index still fails loudly rather than silently.
+            """
+            leaves = []
+            for lab in grp:
+                if 1 <= lab <= len(original_event):
+                    if int(getattr(original_event[lab - 1], "status", 1)) == 2:
+                        continue
+                leaves.append(lab)
+            return leaves if leaves else list(grp)
+
         def _s_groups_lhe_from_pos(pos_i, pos_j):
             # Use original_event for particle lookups since LHE indices refer to it
             Ei = pxi = pyi = pzi = 0.0
             Ej = pxj = pyj = pzj = 0.0
-            for lab in groups[pos_i]:
+            for lab in _group_momentum_labels(groups[pos_i]):
                 q = original_event[lab - 1]
                 Ei += float(q.E)
                 pxi += float(q.px)
                 pyi += float(q.py)
                 pzi += float(q.pz)
-            for lab in groups[pos_j]:
+            for lab in _group_momentum_labels(groups[pos_j]):
                 q = original_event[lab - 1]
                 Ej += float(q.E)
                 pxj += float(q.px)
