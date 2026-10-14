@@ -286,13 +286,6 @@ public:
   bool canVetoProcessLevel() { return doMerge; }
   bool doVetoProcessLevel(Event& process);
 
-  // Override of the base-class parton-level early veto to drive q-cut
-  // variation. Empty qCutListVec ⇒ identical behaviour to base class.
-  // Non-empty ⇒ runs matching for nominal qCut AND each variation, fills
-  // vetoDecisionList, and returns false (driver writes per-variation accept
-  // flags from getVetoVector()).
-  bool doVetoPartonLevelEarly(const Event& event);
-
   // Shower step vetoes (after the first emission, for Shower-kT scheme)
   int  numberVetoStep() {return 1;}
   bool canVetoStep() { return doShowerKt; }
@@ -315,13 +308,6 @@ public:
   bool  getExclusive() { return exclusive; }
   double getPTfirst() { return pTfirstSave; }
 
-  // q-cut variation accessors. Empty list ⇒ legacy single-q-cut behaviour;
-  // non-empty ⇒ doVetoPartonLevelEarly fills vetoDecisionList per event
-  // with 1 (vetoed) / 0 (accepted) entries, in the same order as
-  // qCutListVec.
-  const vector<double>& getQCutList()   const { return qCutListVec; }
-  const vector<int>&    getVetoVector() const { return vetoDecisionList; }
-
   // Note: The functions below have been made public to ease the generation
   // of Python bindings.
   //protected:
@@ -332,15 +318,8 @@ public:
   void runJetAlgorithm();
   bool matchPartonsToJets(int);
   int  matchPartonsToJetsLight();
-  // Parameterised entry for q-cut variation: same matching logic as the
-  // legacy entry but uses qSqArg in place of the member qCutSq, and skips
-  // state side-effects (workEventJetSave / DJR) so the nominal book-keeping
-  // is preserved.
-  int  matchPartonsToJetsLight(double qSqArg);
   int  matchPartonsToJetsHeavy();
-  int  matchPartonsToJetsHeavy(double qSqArg);
   int  matchPartonsToJetsOther();
-  int  matchPartonsToJetsOther(double qSqArg);
   bool doShowerKtVeto(double pTfirst);
 
   // Functions to clear and set the jet clustering scales.
@@ -360,11 +339,6 @@ public:
 
 private:
 
-  // Internal worker for matchPartonsToJetsLight. storeState=true ⇒ writes
-  // workEventJetSave + DJR (legacy/nominal entry); storeState=false ⇒ no
-  // side-effects (q-cut variation entry).
-  int matchPartonsToJetsLightImpl(double qSqArg, bool storeState);
-
   // Stored values of all inputs necessary to perform the jet matching, as
   // needed when the veto is applied externally.
   Event processSubsetSave;
@@ -382,14 +356,6 @@ private:
   bool   doFxFx;
   int    nPartonsNow;
   double qCutME, qCutMESq;
-
-  // q-cut variation list (empty ⇒ legacy single-q-cut mode). qCutListVec
-  // holds the user-supplied list (GeV); qCutSqListVec is the cached square.
-  // vetoDecisionList holds per-event accept/reject for each variation
-  // (1 = vetoed, 0 = accepted), filled by doVetoPartonLevelEarly.
-  vector<double> qCutListVec;
-  vector<double> qCutSqListVec;
-  vector<int>    vetoDecisionList;
 
   // Vector to store the jet clustering scales.
   vector<double> DJR;
@@ -1136,19 +1102,6 @@ inline bool JetMatchingMadgraph::initAfterBeams() {
   nQmatch      = settingsPtr->mode("JetMatching:nQmatch");
   clFact       = settingsPtr->parm("JetMatching:clFact");
 
-  // q-cut variation list. Empty default ⇒ legacy single-q-cut mode.
-  // Lazy-register so direct hook users don't have to addPVec() themselves;
-  // the driver should still register before pythia.readFile so user input
-  // "JetMatching:qCutList = 15 20 30 40" in the Pythia card is accepted.
-  if (!settingsPtr->isPVec("JetMatching:qCutList"))
-    settingsPtr->addPVec("JetMatching:qCutList", vector<double>(),
-                         false, false, 0., 0.);
-  qCutListVec   = settingsPtr->pvec("JetMatching:qCutList");
-  qCutSqListVec.clear();
-  qCutSqListVec.reserve(qCutListVec.size());
-  for (size_t iV = 0; iV < qCutListVec.size(); ++iV)
-    qCutSqListVec.push_back(qCutListVec[iV] * qCutListVec[iV]);
-
   // Read in jet algorithm parameters
   jetAlgorithm   = settingsPtr->mode("JetMatching:jetAlgorithm");
   nJetMax        = settingsPtr->mode("JetMatching:nJetMax");
@@ -1165,23 +1118,6 @@ inline bool JetMatchingMadgraph::initAfterBeams() {
 
   // Read if veto should be performed internally.
   performVeto    = settingsPtr->flag("JetMatching:doVeto");
-
-  // q-cut variation sanity checks (only meaningful when merging is on).
-  if (!qCutListVec.empty()) {
-    for (size_t iV = 0; iV < qCutListVec.size(); ++iV) {
-      if (qCutListVec[iV] <= qCutME) {
-        errorMsg("Error in JetMatchingMadgraph:init: "
-          "JetMatching:qCutList entries must exceed JetMatching:qCutME");
-        return false;
-      }
-    }
-    if (doShowerKt) {
-      errorMsg("Error in JetMatchingMadgraph:init: "
-        "JetMatching:qCutList is incompatible with "
-        "JetMatching:doShowerKt");
-      return false;
-    }
-  }
 
   // If not merging, then done
   if (!doMerge) return true;
@@ -1719,29 +1655,12 @@ inline bool JetMatchingMadgraph::matchPartonsToJets(int iType) {
 //       that is harder than any matched soft jet
 //   4 = veto as there is a parton which does not match a jet
 
-// Legacy entry: uses the member qCutSq and writes nominal book-keeping
-// (workEventJetSave, performVeto early-out, DJR via the dispatch).
 inline int JetMatchingMadgraph::matchPartonsToJetsLight() {
-  return matchPartonsToJetsLightImpl(qCutSq, true);
-}
-
-// Variation entry: uses caller-supplied qSqArg, no book-keeping side
-// effects so the nominal call's state is preserved.
-inline int JetMatchingMadgraph::matchPartonsToJetsLight(double qSqArg) {
-  return matchPartonsToJetsLightImpl(qSqArg, false);
-}
-
-inline int JetMatchingMadgraph::matchPartonsToJetsLightImpl(
-  double qSqArg, bool storeState) {
 
   // Store things that are necessary to perform the kT-MLM veto externally.
-  // Only on the legacy/nominal entry; q-cut variation entry skips this so
-  // the nominal book-keeping is preserved across the variation loop.
-  if (storeState) {
-    workEventJetSave  = workEventJet;
-    // Done if only inputs for an external vetoing procedure should be stored.
-    if (!performVeto) return NONE;
-  }
+  workEventJetSave  = workEventJet;
+  // Done if only inputs for an external vetoing procedure should be stored.
+  if (!performVeto) return false;
 
   // Count the number of hard partons
   int nParton = typeIdx[0].size();
@@ -1752,7 +1671,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsLightImpl(
       "Light: the SlowJet algorithm failed on setup");
     return NONE;
   }
-  double localQcutSq = qSqArg;
+  double localQcutSq = qCutSq;
   double dOld = 0.0;
   // Cluster in steps to find all hadronic jets at the scale qCut
   while ( slowJet->sizeAll() - slowJet->sizeJet() > 0 ) {
@@ -1849,7 +1768,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsLightImpl(
        for (int i = 0; i < nParton; ++i)
          partonPt.push_back( eventProcess[typeIdx[0][i]].pT2() );
        sort( partonPt.begin(), partonPt.end());
-       localQcutSq = max( qSqArg, partonPt[0]);
+       localQcutSq = max( qCutSq, partonPt[0]);
     }
     nJets = slowJet->sizeJet();
     nClus = slowJet->sizeAll();
@@ -2008,10 +1927,8 @@ inline int JetMatchingMadgraph::matchPartonsToJetsLightImpl(
   if (nParton > 0 && pTminEstimate > 0) eTpTlightMin = pTminEstimate;
   else eTpTlightMin = -1.;
 
-  // Record the jet separations (legacy/nominal call only — q-cut variation
-  // calls leave DJR untouched, so the nominal value set by matchPartonsToJets
-  // dispatch above remains in place).
-  if (storeState) setDJR(workEventJet);
+  // Record the jet separations.
+  setDJR(workEventJet);
 
   // No veto
   return NONE;
@@ -2027,12 +1944,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsLightImpl(
 //   2 = veto as in inclusive mode and extra jets were harder
 //       than any matched light jet
 
-// Legacy entry: uses member qCutSq.
 inline int JetMatchingMadgraph::matchPartonsToJetsHeavy() {
-  return matchPartonsToJetsHeavy(qCutSq);
-}
-
-inline int JetMatchingMadgraph::matchPartonsToJetsHeavy(double qSqArg) {
 
   // Currently, heavy jets are unmatched
   // If there are no extra jets, then accept
@@ -2065,7 +1977,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsHeavy(double qSqArg) {
 
 
   while ( hjSlowJet->sizeAll() - hjSlowJet->sizeJet() > 0 ) {
-    if( hjSlowJet->dNext() > qSqArg ) break;
+    if( hjSlowJet->dNext() > qCutSq ) break;
     hjSlowJet->doStep();
   }
 
@@ -2073,7 +1985,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsHeavy(double qSqArg) {
   // Count the number of clusters with pT>qCut.  This includes the
   //  original hard partons plus any hard emissions.
   for(int idx=0 ; idx< hjSlowJet->sizeAll(); ++idx) {
-    if( hjSlowJet->pT(idx) > sqrt(qSqArg) ) nCLjets++;
+    if( hjSlowJet->pT(idx) > sqrt(qCutSq) ) nCLjets++;
   }
 
   // Debug printout.
@@ -2114,12 +2026,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsHeavy(double qSqArg) {
 //   2 = veto as in inclusive mode and extra jets were harder
 //       than any matched light jet
 
-// Legacy entry: uses member qCutSq.
 inline int JetMatchingMadgraph::matchPartonsToJetsOther() {
-  return matchPartonsToJetsOther(qCutSq);
-}
-
-inline int JetMatchingMadgraph::matchPartonsToJetsOther(double qSqArg) {
 
   // Currently, heavy jets are unmatched
   // If there are no extra jets, then accept
@@ -2152,7 +2059,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsOther(double qSqArg) {
 
 
   while ( hjSlowJet->sizeAll() - hjSlowJet->sizeJet() > 0 ) {
-    if( hjSlowJet->dNext() > qSqArg ) break;
+    if( hjSlowJet->dNext() > qCutSq ) break;
     hjSlowJet->doStep();
   }
 
@@ -2160,7 +2067,7 @@ inline int JetMatchingMadgraph::matchPartonsToJetsOther(double qSqArg) {
   // Count the number of clusters with pT>qCut.  This includes the
   //  original hard partons plus any hard emissions.
   for(int idx=0 ; idx< hjSlowJet->sizeAll(); ++idx) {
-    if( hjSlowJet->pT(idx) > sqrt(qSqArg) ) nCLjets++;
+    if( hjSlowJet->pT(idx) > sqrt(qCutSq) ) nCLjets++;
   }
 
   // Debug printout.
@@ -2189,73 +2096,6 @@ inline int JetMatchingMadgraph::matchPartonsToJetsOther(double qSqArg) {
 
   // No extra jets were present so no veto
   return NONE;
-}
-
-//--------------------------------------------------------------------------
-
-// Override of base-class doVetoPartonLevelEarly to support q-cut variation.
-// Empty qCutListVec ⇒ identical loop to the base class (legacy). Non-empty
-// ⇒ run nominal matching AND every variation across all iTypes, fill
-// vetoDecisionList per variation, and return false (driver writes per-q-cut
-// accept flags from getVetoVector()).
-
-inline bool JetMatchingMadgraph::doVetoPartonLevelEarly(const Event& event) {
-
-  vetoDecisionList.clear();
-
-  // Sort the incoming process — q-cut-independent, run once.
-  sortIncomingProcess(event);
-
-  // Shower-kT scheme handles its veto in doVetoStep, not here.
-  if (doShowerKt) return false;
-
-  int iTypeEnd = (typeIdx[2].empty()) ? 2 : 3;
-
-  // Legacy / no-variation mode: short-circuit on first iType veto, exactly
-  // as the base-class implementation does.
-  if (qCutListVec.empty()) {
-    for (int iType = 0; iType < iTypeEnd; ++iType) {
-      jetAlgorithmInput(event, iType);
-      runJetAlgorithm();
-      if (matchPartonsToJets(iType)) return true;
-    }
-    return false;
-  }
-
-  // Variation mode: compute veto for nominal AND every variation across all
-  // iTypes. Don't short-circuit because we need per-variation results.
-  bool nominalVetoed = false;
-  vector<bool> varVetoed(qCutListVec.size(), false);
-
-  for (int iType = 0; iType < iTypeEnd; ++iType) {
-    jetAlgorithmInput(event, iType);
-    runJetAlgorithm();
-
-    // Nominal: existing dispatch sets DJR / nMEpartons for iType==0 and
-    // runs the matching at member qCutSq.
-    if (!nominalVetoed && matchPartonsToJets(iType)) nominalVetoed = true;
-
-    // Variations: parameterised entries — no state side-effects.
-    for (size_t v = 0; v < qCutSqListVec.size(); ++v) {
-      if (varVetoed[v]) continue;
-      double qSqV = qCutSqListVec[v];
-      bool typeVeto = false;
-      if      (iType == 0) typeVeto = (matchPartonsToJetsLight(qSqV) > 0);
-      else if (iType == 1) typeVeto = (matchPartonsToJetsHeavy(qSqV) > 0);
-      else                 typeVeto = (matchPartonsToJetsOther(qSqV) > 0);
-      if (typeVeto) varVetoed[v] = true;
-    }
-  }
-
-  vetoDecisionList.reserve(qCutListVec.size());
-  for (size_t v = 0; v < qCutListVec.size(); ++v)
-    vetoDecisionList.push_back(varVetoed[v] ? 1 : 0);
-
-  // Variation mode: never veto in the hook. Driver writes per-variation
-  // accept flags from getVetoVector(). Note: nominalVetoed is computed but
-  // not returned — analyses can recover the nominal cross-section from the
-  // appropriate Weight_MERGING= entry in the sidecar/HepMC.
-  return false;
 }
 
 //==========================================================================
