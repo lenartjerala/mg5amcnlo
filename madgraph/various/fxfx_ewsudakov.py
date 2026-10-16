@@ -2091,20 +2091,26 @@ class DensityMatrix:
 
     def contract(self, other: "DensityMatrix") -> float:
         """
-        Compute trace contraction with another density matrix.
+        Spin-correlated contraction with another density matrix.
 
-        Computes Tr[ρ₁ · ρ₂] = Σ_{h,h'} ρ₁[h,h'] × ρ₂[h',h]
+        Computes <ρ₁, ρ₂> = Σ_{h,h'} ρ₁[h,h'] × ρ₂[h,h'] (equivalently Tr[ρ₁ · ρ₂ᵀ]).
+
+        Both matrices are stored as X[h,h'] = A_h A*_h': the production matrix
+        from amplitudes with the resonances outgoing, the decay matrix from
+        amplitudes with them incoming, in the same helicity ordering.  The
+        coherent production-decay rate |Σ_h M_h D_h|² is then
+        Σ_{h,h'} B[h,h'] C[h,h'].
 
         Args:
             other: Another DensityMatrix (typically decay matrix C)
 
         Returns:
-            Tr[self · other] (real part)
+            <self, other> (real part)
         """
         if self.total_dim != other.total_dim:
             raise ValueError(f"Dimension mismatch: {self.total_dim} vs {other.total_dim}")
 
-        return np.trace(self.matrix @ other.matrix).real
+        return np.sum(self.matrix * other.matrix).real
 
     def __repr__(self) -> str:
         return (
@@ -2289,7 +2295,7 @@ def compute_density_weight(
     Compute the EW Sudakov reweighting factor using density matrices.
 
     Implements:
-        w = Tr[B^EWSL · C] / Tr[B · C]
+        w = <B^EWSL, C> / <B, C>,   <X, C> = Σ_{h,h'} X[h,h'] C[h,h']  (DensityMatrix.contract)
 
     where B^EWSL is the NLO Sudakov-corrected Born density matrix:
         B^EWSL[h,h'] = B[h,h'] × (1 + Δ_h + Δ*_h')
@@ -2317,7 +2323,7 @@ def compute_density_weight(
         denominator = B.trace()
 
     if abs(denominator) < 1e-15:
-        _dbg("Denominator Tr[B·C] ≈ 0, returning weight=1")
+        _dbg("Denominator <B,C> ≈ 0, returning weight=1")
         return 1.0
 
     _dbg(f"  numerator={numerator}")
@@ -4174,7 +4180,7 @@ class FxFxEWSudakovMixin:
         3. Get Born density matrix B from matrix element M and Sudakov corrections delta_h
         4. If decays present: get decay density matrix C
         5. Apply Sudakov per helicity: M^EWSL_h = M_h * (1 + delta_h)
-        6. Compute weight: w = Tr[B^EWSL * C] / Tr[B * C]
+        6. Compute weight: w = <B^EWSL, C> / <B, C> (DensityMatrix.contract)
 
         Options (set via self attributes):
         - density_verbose: Enable verbose logging (default: False)
@@ -4751,14 +4757,14 @@ class FxFxEWSudakovMixin:
                         _dbg(f"     Tr[C] = {C.trace():.6e}")
 
                         # Compute contractions explicitly
-                        tr_BC = B.contract(C)
-                        _dbg(f"     Tr[B*C] = {tr_BC:.6e}")
+                        contr_BC = B.contract(C)
+                        _dbg(f"     <B,C> = {contr_BC:.6e}")
 
                         # B_EWSL construction
                         B_ewsl = B.apply_sudakov(delta)
                         _dbg(f"     B_EWSL diagonal: {np.real(np.diag(B_ewsl.matrix))}")
-                        tr_BewslC = B_ewsl.contract(C)
-                        _dbg(f"     Tr[B_EWSL*C] = {tr_BewslC:.6e}")
+                        contr_BewslC = B_ewsl.contract(C)
+                        _dbg(f"     <B_EWSL,C> = {contr_BewslC:.6e}")
 
                         # Compute density weight (central)
                         weight = compute_density_weight(B, C, delta)
