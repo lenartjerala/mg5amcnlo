@@ -545,21 +545,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         model = self.banner.get('proc_card', 'model')
         self.load_model(model, True, False)
 
-        # Collect the processes required by the complete FxFx xi scan.
-        # A second pass over this module's own output would key all old
-        # 20XX/21XX/22XX variants by the same two-digit suffix and compound a
-        # previous correction into the new one.  Refuse that input up front.
-        if (
-            self.inc_sudakov
-            and "initrwgt" in self.banner
-            and "_sud" in self.banner["initrwgt"]
-        ):
-            raise Exception(
-                "Input LHE banner already declares EW-Sudakov weights "
-                "('_sud' labels in <initrwgt>): refusing to reweight twice. "
-                "Start again from the pre-reweighting event file."
-            )
         self._ensure_fxfx_cluster_catalogue()
+        if self.inc_sudakov:
+            self._collect_sudakov_weight_sources()
 
         if not self.has_standalone_dir:
             out = self.setup_f2py_interface(opts)
@@ -574,21 +562,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         else:
             path_me = self.me_dir 
         
-        scale_rwgt_info=[]
-        if 'initrwgt' in self.banner and self.output_type == 'default': 
-            for i in self.banner['initrwgt'].split('\n'):
-                if "weight id" in i:
-                    start = i.find('weight')
-                    scale_rwgt_info.append(i[start+11:start+15])
-                    
         if self.inc_sudakov:
-            type_rwgt=[]
-            for tag in scale_rwgt_info:
-                tag_strip=tag[1:]
-                type_rwgt.append('2'+tag_strip)
+            type_rwgt = self._prepare_sudakov_weight_ids()
 
-
-            
         # get iterator over param_card and the name associated to the current reweighting.
         param_card_iterator, tag_name = self.handle_param_card(model_line, args, type_rwgt)
 
@@ -618,44 +594,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             logger.info('EW Sudakov reweight module imported')
             self._validate_fxfx_sudakov_catalogue(sud_mod)
 
-        if type_rwgt==[]:
-            if self.inc_sudakov:
-                # ξ-scan only affects the FxFx (ickkw=3) path; the ickkw=0 path uses its
-                # own hardcoded threshold and is intentionally left out of the scan.
-                try:
-                    ickkw = int(self.banner.get('run_card', 'ickkw'))
-                except Exception:
-                    ickkw = 0
-                self._sudakov_ickkw = ickkw
-
-                if ickkw != 3 and self.sudakov_xi_scan and len(self.sudakov_xi_scan) > 1:
-                    logger.warning(
-                        "sudakov_xi scan ignored: ickkw=%d path does not use the FxFx clustering threshold. "
-                        "Falling back to single-weight legacy mode.", ickkw)
-
-                if ickkw == 3:
-                    xi_list = self.sudakov_xi_scan or [getattr(self, 'mW2_cluster_scale', 1.5)]
-                else:
-                    xi_list = [getattr(self, 'mW2_cluster_scale', 1.5)]
-
-                if 5 * len(xi_list) > 80:
-                    raise Exception("sudakov_xi scan has %d values; max 16 (5 prefixes per ξ in range 20–99)." % len(xi_list))
-                self._sudakov_xi_list = xi_list
-
-                # Five Sudakov NLL variants per ξ — see SUDAKOV_VARIANT_NAMES in
-                # fxfx_ewsudakov.py for the order:
-                #   v=0 central, v=1 s_to_rij_off, v=2 LL, v=3 both_off, v=4 rij_ge_mw_off
-                # ξ_k → prefixes (20+5k) … (24+5k). k=0,v=0 → 2001 (legacy central);
-                # k=0,v=1 → 2101 (legacy variation). Backward-compatible for those two slots.
-                type_rwgt = []
-                for k in range(len(xi_list)):
-                    base = 20 + 5 * k
-                    for variant_idx in range(5):
-                        type_rwgt.append('%d01' % (base + variant_idx))
-                if len(xi_list) > 1:
-                    logger.info('EW Sudakov ξ-scan over %s (5 variants per ξ)', xi_list)
-            else:
-                type_rwgt=['2001']
+        if not type_rwgt:
+            type_rwgt = self._prepare_sudakov_weight_ids() if self.inc_sudakov else ['2001']
 
         if self.second_model or self.second_process or self.dedicated_path:
             rw_dir = pjoin(path_me, 'rw_me_%s' % self.nb_library)
@@ -699,19 +639,6 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         for event_nb,event in enumerate(self.lhe_input):
             # Set current event ID for debug printouts (1-based to match user expectations)
             fxfx_ewsudakov.CURRENT_EVENT_ID = event_nb + 1
-            if event_nb == 0 and self.inc_sudakov:
-                prior_sudakov = [
-                    key
-                    for key in event.parse_reweight()
-                    if fxfx_ewsudakov.is_prior_sudakov_id(key)
-                ]
-                if prior_sudakov:
-                    raise Exception(
-                        "First event already carries EW-Sudakov weight "
-                        "columns %s: refusing to reweight twice. Start from "
-                        "the pre-reweighting file."
-                        % sorted(prior_sudakov)[:6]
-                    )
             #control logger
             if (event_nb % max(int(10**int(math.log10(float(event_nb)+1))),10)==0):
                     running_time = misc.format_timer(time.time()-start)
@@ -735,19 +662,17 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 ratio[name] += weight[name]/event.wgt
                 ratio_square[name] += (weight[name]/event.wgt)**2
 
-            # ensure to have a consistent order of the weights. new one are put
-            # at the back, remove old position if already defines
-            for tag in type_rwgt:
-                # HACK: Allow re-reweighting for development/debugging
-                #if tag in event.reweight_order:
-                #    logger.critical('This is a reweighted event file! Do not reweight with ewsudakov twice')
-                #    return
-                try:
-                    event.reweight_order.remove('%s%s'  % (tag_name,tag))
-                except ValueError:
-                    continue
-
-            event.reweight_order += ['%s%s' % (tag_name,name) for name in type_rwgt]  
+            if self.inc_sudakov:
+                event.reweight_order = [key for key in event.reweight_order
+                                       if key not in self._sudakov_weight_metadata]
+                event.reweight_order.extend(key for key in type_rwgt if key in weight)
+            else:
+                for tag in type_rwgt:
+                    try:
+                        event.reweight_order.remove('%s%s' % (tag_name, tag))
+                    except ValueError:
+                        continue
+                event.reweight_order += ['%s%s' % (tag_name, name) for name in type_rwgt]
             if self.output_type == "default":
                 for name in weight:
                     if 'orig' in name:
@@ -988,7 +913,11 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             new_card = open(pjoin(rw_dir, 'Cards', 'param_card.dat')).read()
 
         # Find new tag in the banner and add information if needed
-        if 'initrwgt' in self.banner and self.output_type == 'default':
+        if self.inc_sudakov:
+            header_rwgt_other = self.banner['initrwgt'] if 'initrwgt' in self.banner else ''
+            mg_rwgt_info = []
+            rewgtid = 1
+        elif 'initrwgt' in self.banner and self.output_type == 'default':
             if 'name=\'mg_reweighting\'' in self.banner['initrwgt']:
                 blockpat = re.compile(r'''<weightgroup name=\'mg_reweighting\'\s*weight_name_strategy=\'includeIdInWeightName\'>(?P<text>.*?)</weightgroup>''', re.I+re.M+re.S)
                 before, content, after = blockpat.split(self.banner['initrwgt'])
@@ -1078,46 +1007,24 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             for name in type_rwgt:
                 mg_rwgt_info.append((tag, name, str_info))
 
-        # re-create the banner.
-        self.banner['initrwgt'] = header_rwgt_other
-        if self.output_type == 'default':
-            self.banner['initrwgt'] += '\n<weightgroup name=\'mg_reweighting\' weight_name_strategy=\'includeIdInWeightName\'>\n'
+        if self.inc_sudakov:
+            self.banner['initrwgt'] = self._sudakov_weight_header()
         else:
-            self.banner['initrwgt'] += '\n<weightgroup name=\'main\'>\n'
-        for tag, rwgttype, diff in mg_rwgt_info:
-            if self.inc_sudakov:
-                try:
-                    sud_order = int(rwgttype[-1]) -1
-                    sud_order = '10' +rwgttype[-2:]
-                    # Decode (ξ-index, variant-index) from the prefix:
-                    #   prefix = 20 + 5k + v  → ξ_k variant v (v=0 central .. v=4 rij_ge_mw_off)
-                    xi_label = ''
-                    try:
-                        prefix = int(rwgttype[:2])
-                        xi_idx = (prefix - 20) // 5
-                        variant_idx = (prefix - 20) % 5
-                        xi_list = self._sudakov_xi_list or []
-                        variant_names = fxfx_ewsudakov.FxFxEWSudakovMixin.SUDAKOV_VARIANT_NAMES
-                        if 0 <= xi_idx < len(xi_list) and 0 <= variant_idx < len(variant_names):
-                            xi_label = " xi=%g variant=%s" % (
-                                xi_list[xi_idx], variant_names[variant_idx])
-                    except (ValueError, TypeError):
-                        pass
-                    self.banner['initrwgt'] += '<weight id=\'%s\'>%sscale_%s_sud%s</weight>\n' % \
-                            (rwgttype, diff, sud_order, xi_label)
-                except IndexError:
-                    # HACK: Allow re-reweighting for development/debugging
-                    logger.warning('Re-reweighting file (IndexError on rwgttype) - continuing anyway')
-                    pass
+            # re-create the banner.
+            self.banner['initrwgt'] = header_rwgt_other
+            if self.output_type == 'default':
+                self.banner['initrwgt'] += '\n<weightgroup name=\'mg_reweighting\' weight_name_strategy=\'includeIdInWeightName\'>\n'
             else:
+                self.banner['initrwgt'] += '\n<weightgroup name=\'main\'>\n'
+            for tag, rwgttype, diff in mg_rwgt_info:
                 if tag.isdigit():
                     self.banner['initrwgt'] += '<weight id=\'rwgt_%s%s\'>%s</weight>\n' % \
-                                    (tag, rwgttype, diff)
+                                        (tag, rwgttype, diff)
                 else:
                     self.banner['initrwgt'] += '<weight id=\'%s%s\'>%s</weight>\n' % \
-                                    (tag, rwgttype, diff)
-        self.banner['initrwgt'] += '\n</weightgroup>\n'
-        self.banner['initrwgt'] = self.banner['initrwgt'].replace('\n\n', '\n')
+                                        (tag, rwgttype, diff)
+            self.banner['initrwgt'] += '\n</weightgroup>\n'
+            self.banner['initrwgt'] = self.banner['initrwgt'].replace('\n\n', '\n')
 
         if self.flag_density_matrix:
             logger.info('starts to compute density matrices for events with the inputs from the reweight_card:')
@@ -1337,41 +1244,15 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 self._current_xi_idx = 0
                 return self._compute_ewsudakov_reweight(event, sud_mod)
             elif ickkw == 3:
-                # Multicore workers may not have run the do_launch xi-list-setup branch
-                # (which is gated on type_rwgt being empty). They DO re-parse the card,
-                # so self.sudakov_xi_scan is reliable. Fall back to it if the finalised
-                # list is missing.
-                xi_list = (self._sudakov_xi_list
-                           or self.sudakov_xi_scan
+                xi_list = (self._sudakov_xi_list or self.sudakov_xi_scan
                            or [getattr(self, 'mW2_cluster_scale', 1.5)])
-                _xi_dbg = not getattr(self, '_xi_dbg_done', False)
-                if _xi_dbg:
-                    logger.info("[XI-SCAN-DBG] xi_list=%s (len=%d), _sudakov_xi_list=%s",
-                                xi_list, len(xi_list), self._sudakov_xi_list)
-                merged = None
+                merged = {}
                 for k, xi in enumerate(xi_list):
-                    # The clustering threshold is read per-event via getattr(self, "mW2_cluster_scale", 1.5)
-                    # at fxfx_ewsudakov.py:2790. Setting it here propagates to the next clustering call.
                     self.mW2_cluster_scale = xi
                     self._current_xi_idx = k
                     sub = self._compute_density_ewsudakov_reweight(event, sud_mod)
-                    if _xi_dbg:
-                        sub_prefixes = sorted(set(str(key)[:2] for key in sub.keys() if str(key) != 'orig'))
-                        logger.info("[XI-SCAN-DBG] iter k=%d xi=%g: sub has %d keys, prefixes=%s",
-                                    k, xi, len(sub), sub_prefixes)
-                    if merged is None:
-                        merged = sub
-                    else:
-                        # Subsequent ξ-values: keep their (22XX/23XX/...) entries, drop their 'orig'.
-                        for key, val in sub.items():
-                            if key == 'orig':
-                                continue
-                            merged[key] = val
-                if _xi_dbg:
-                    merged_prefixes = sorted(set(str(key)[:2] for key in (merged or {}).keys() if str(key) != 'orig'))
-                    logger.info("[XI-SCAN-DBG] FINAL merged has %d keys, prefixes=%s",
-                                len(merged or {}), merged_prefixes)
-                    self._xi_dbg_done = True
+                    merged.update((key, value) for key, value in sub.items()
+                                  if key != 'orig' or k == 0)
                 return merged
             else:
                 raise Exception("EW Sudakov reweighting not supported for run_card ickkw=%s" % ickkw)
@@ -1397,19 +1278,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         n_init  = sum(1 for p in buff_event if p.status == -1)
         n_final = sum(1 for p in buff_event if p.status ==  1)
         if n_init == 2 and n_final == 1:
-            rwgt_dict = copy.deepcopy(event.parse_reweight())
-            if rwgt_dict == {}:
-                rwgt_dict['1001'] = orig_wgt
-            xi_idx = getattr(self, '_current_xi_idx', 0)
-            base_prefix = 20 + 5 * xi_idx
-            rwgt_dict_new = {'orig': orig_wgt} if xi_idx == 0 else {}
-            for el in rwgt_dict:
-                if fxfx_ewsudakov.is_prior_sudakov_id(el):
-                    continue
-                ending = el[-2:]
-                for v in range(5):
-                    rwgt_dict_new['%d%s' % (base_prefix + v, ending)] = rwgt_dict[el]
-            return rwgt_dict_new
+            names = getattr(self, '_sudakov_variant_names', self.SUDAKOV_LO_VARIANT_NAMES)
+            return self._build_sudakov_rwgt_dict(event, [1.0] * len(names), names)
 
         mgcmd = self.mg5cmd
 
@@ -1585,29 +1455,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         # Dummy step: needed to read in the parse_reweight function
         event.rescale_weights(1.)
 
-        rwgt_dict = copy.deepcopy(event.parse_reweight())
-        if rwgt_dict=={}:
-            rwgt_dict['1001'] = orig_wgt
-        # Emit all 5 NLL variants per ξ. Variant order matches
-        # SUDAKOV_VARIANT_NAMES in fxfx_ewsudakov.py:
-        #   v=0 central (sudrat1)        → prefix (20+5k)
-        #   v=1 s_to_rij_off (sudrat2)   → prefix (21+5k)
-        #   v=2 LL only (sudrat0)        → prefix (22+5k)
-        #   v=3 both_off (sudrat3)       → prefix (23+5k)
-        #   v=4 rij_ge_mw_off (sudrat4)  → prefix (24+5k)
-        xi_idx = getattr(self, '_current_xi_idx', 0)
-        base_prefix = 20 + 5 * xi_idx
-        sudrats = [sudrat1, sudrat2, sudrat0, sudrat3, sudrat4]
-        rwgt_dict_new = {'orig': orig_wgt} if xi_idx == 0 else {}
-        for el in rwgt_dict:
-            if fxfx_ewsudakov.is_prior_sudakov_id(el):
-                continue
-            ending = el[-2:]
-            for variant_idx, w in enumerate(sudrats):
-                tag = '%d%s' % (base_prefix + variant_idx, ending)
-                rwgt_dict_new[tag] = rwgt_dict[el] * w
-
-        return rwgt_dict_new
+        names = getattr(self, '_sudakov_variant_names', self.SUDAKOV_LO_VARIANT_NAMES)
+        return self._build_sudakov_rwgt_dict(
+            event, [sudrat1, sudrat2, sudrat0, sudrat3, sudrat4], names)
 
     def get_pdg_tuple(self, pdgs, nincoming):
         """write a tuple of 2 tuple, with the incoming particles unsorted
@@ -3009,6 +2859,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         to_save['allow_missing_finalstate'] = self.options['allow_missing_finalstate']
         to_save['identical_particle_in_prod_and_decay'] = self.options['identical_particle_in_prod_and_decay']
         to_save['nb_library'] = self.nb_library
+        if self.inc_sudakov:
+            to_save['sudakov_source_ids'] = self._sudakov_source_ids
 
         name = pjoin(self.rwgt_dir, 'rw_me', 'rwgt.pkl')
         save_load_object.save_to_file(name, to_save)
@@ -3020,6 +2872,11 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         obj = save_load_object.load_from_file( pjoin(self.rwgt_dir, 'rw_me', 'rwgt.pkl'))
         
         self.has_standalone_dir = True
+        if self.inc_sudakov and self.multicore == 'wait':
+            sources = set(obj['sudakov_source_ids'])
+            if not set(self._sudakov_source_ids).issubset(sources):
+                raise ValueError('Worker source weights are absent from the shared Sudakov layout.')
+            self._sudakov_source_ids = sources
         if 'rwgt_info' in self.options:
             self.options = {'rwgt_info': self.options['rwgt_info']}
         else: 

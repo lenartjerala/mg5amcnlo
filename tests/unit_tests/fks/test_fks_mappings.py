@@ -550,40 +550,24 @@ class TestDensityKernelLimits(unittest.TestCase):
         self.assertFalse(fx.density_dimensions_supported(1, 11))
 
 
-class TestSudakovSourceFiltering(unittest.TestCase):
-    def test_prior_sudakov_columns_are_not_compounded(self):
-        class FakeEvent(object):
+class TestSudakovSources(unittest.TestCase):
+    def test_numeric_source_ids_remain_distinct(self):
+        class Event:
             wgt = 2.0
 
-            @staticmethod
-            def parse_reweight():
-                return {
-                    "1001": 2.0,
-                    "2001": 200.0,
-                    "2101": 210.0,
-                    "2201": 220.0,
-                }
+            def parse_reweight(self):
+                return {"1001": 2.0, "2001": 200.0, "2101": 210.0, "2201": 220.0}
 
-        dummy = type(
-            "DummyMixin",
-            (),
-            {
-                "_current_xi_idx": 0,
-                "SUDAKOV_VARIANT_NAMES":
-                    fx.FxFxEWSudakovMixin.SUDAKOV_VARIANT_NAMES,
-            },
-        )()
-        weights = [1.1, 0.9, 1.05]
-        result = fx.FxFxEWSudakovMixin._build_sudakov_rwgt_dict(
-            dummy, FakeEvent(), weights
-        )
-
-        self.assertEqual(set(result), {"orig", "2001", "2101", "2201"})
-        self.assertAlmostEqual(result["2001"], 2.0 * weights[0])
-        self.assertAlmostEqual(result["2101"], 2.0 * weights[1])
-        self.assertAlmostEqual(result["2201"], 2.0 * weights[2])
-        self.assertTrue(fx.is_prior_sudakov_id("2001"))
-        self.assertFalse(fx.is_prior_sudakov_id("1001"))
+        driver = fx.FxFxEWSudakovMixin()
+        event = Event()
+        factors = [1.1, 0.9, 1.05]
+        result = driver._build_sudakov_rwgt_dict(event, factors)
+        self.assertEqual(len(result), 13)
+        self.assertFalse(set(event.parse_reweight()) & set(result))
+        for source, value in event.parse_reweight().items():
+            for variant, factor in enumerate(factors):
+                key = driver._sudakov_weight_map[0, variant, source]
+                self.assertAlmostEqual(result[key], value * factor)
 
 
 class TestForcedClusteringPlumbing(unittest.TestCase):

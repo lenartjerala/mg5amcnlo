@@ -38,6 +38,8 @@ from functools import reduce
 from itertools import product
 from operator import mul
 from typing import List, Optional, Tuple
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape, quoteattr
 
 import madgraph.various.lhe_parser as lhe_parser
 import numpy as np
@@ -58,24 +60,12 @@ DEBUG = False
 # Event counter set by reweight_interface.py during event loop (1-based)
 CURRENT_EVENT_ID = 0
 
-# Weight IDs emitted by this module have a two-digit prefix in 20..99 and
-# inherit the final two digits of their source weight.  Never use those
-# columns as sources on a later pass: doing so compounds a previous Sudakov
-# correction and, because IDs are keyed only by suffix, cross-contaminates the
-# central and variation columns.
-_PRIOR_SUDAKOV_ID = re.compile(r"^[2-9]\d{3}$")
-_PRIOR_SUD_WARNED = False
 _DIM_OVERFLOW_WARNED = False
 
 # Fixed dimensions in the generated density dispatcher/Fortran wrapper.
 MAX_DENSITY_DIM = 36
 MAX_DENSITY_RESONANCES = 10
 MAX_DENSITY_ALLOW_HEL = 300
-
-
-def is_prior_sudakov_id(key):
-    """Return whether *key* is in this module's 20XX--99XX output space."""
-    return bool(_PRIOR_SUDAKOV_ID.match(str(key)))
 
 
 def density_dimensions_supported(total_dim, nres):
@@ -3692,11 +3682,13 @@ class FxFxEWSudakovMixin:
         self._fxfx_cluster_catalog_ready = False
         self.fxfx_clustered_final_states = set()
         self.fxfx_clustered_decay_processes = set()
+        self._sudakov_source_ids = set()
         self._init_pole_masses_from_banner()
         logger.info("Collecting FxFx processes from %s at xi=%s", source, xis)
         try:
             with contextlib.closing(lhe_parser.EventFile(source)) as events:
                 for event in events:
+                    self._sudakov_source_ids.update(event.parse_reweight() or {"1001": event.wgt})
                     for xi in xis:
                         self.mW2_cluster_scale = xi
                         cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
@@ -4099,102 +4091,116 @@ class FxFxEWSudakovMixin:
         _dbg(f"[SMALLINV] _has_small_invariants EXIT: all {nlegs*(nlegs-1)//2} pairs above MW² -> returning False")
         return False
 
-    # Sudakov variant order — must match the indexing used by both the scalar
-    # ewsudakov() Fortran call (returns res[1..5]) and the banner-label decoder
-    # in reweight_interface.py.
-    #
-    # Three variants emitted per ξ (down from five). The Fortran kernel still
-    # returns res[1..5]; we just don't propagate res[4] (both_off) and res[5]
-    # (rij_ge_mw_off) into weight columns, because the Python-side SMALL_INV
-    # pre-filter (_has_small_invariants) drops any event with |s_ij| < M_W²
-    # BEFORE the Fortran call, so the kernel's rij_ge_mw clamp never engages.
-    # With the clamp inert, res[4] is algebraically forced to equal res[3]
-    # (both_off ≡ s_to_rij_off) and res[5] ≡ res[2] (rij_ge_mw_off ≡ central).
-    # Confirmed in the audit: 92/92 events show this exact degeneracy.
-    #
-    # Stride remains 5 in base_prefix to preserve legacy weight-IDs across ξ
-    # indices (ξ=0 → 20/21/22XX, ξ=1 → 25/26/27XX, ξ=2 → 30/31/32XX). IDs at
-    # (20+5k+3)XX and (20+5k+4)XX are no longer emitted (used to hold the
-    # redundant both_off and rij_ge_mw_off columns).
-    SUDAKOV_VARIANT_NAMES = (
-        "central",         # res[2]: NLL Sudakov, sud_mod=1 (QED excluded)    (legacy 20XX)
-        "s_to_rij_off",    # res[3]: NLL Sudakov, s_to_rij=OFF, rij_ge_mw=ON  (legacy 21XX)
-        "sherpa_qed",      # res[1]: NLL Sudakov, sud_mod=0 (Sherpa-style QED:
-                           #         drops Lem/lem contributions; NOT leading-log only.
-                           #         Both slots compute 2·(LSC+SSC+XXC+PAR); they
-                           #         differ only by the QED-treatment knob in the
-                           #         Fortran kernel — see ewsudakov_functions.f:1-4)
-                           #                                                   (legacy 22XX)
-    )
+    # FxFx applies the invariant cut before evaluating these three variants.
+    SUDAKOV_VARIANT_NAMES = ("central", "s_to_rij_off", "sherpa_qed")
+    SUDAKOV_LO_VARIANT_NAMES = SUDAKOV_VARIANT_NAMES + ("both_off", "rij_ge_mw_off")
 
-    def _build_sudakov_rwgt_dict(self, event, weights):
-        """Build reweight dictionary with three Sudakov variants per ξ.
+    def _collect_sudakov_weight_sources(self):
+        """Collect full source IDs from the input header and event stream."""
+        header = self.banner["initrwgt"] if "initrwgt" in self.banner else ""
+        tree = ElementTree.fromstring("<initrwgt>" + header + "</initrwgt>")
+        for group in tree.findall("weightgroup"):
+            if group.get("name") == "ew_sudakov":
+                raise ValueError("Input declares EW Sudakov weights; supply source event weights.")
+        declared = set()
+        for entry in tree.iter("weight"):
+            declared.add(entry.attrib["id"])
+            if re.search(r"scale_\S+_sud(?:\s|$)", "".join(entry.itertext())):
+                raise ValueError("Input declares EW Sudakov weights; supply source event weights.")
+        self._sudakov_input_header = header
+        self._sudakov_declared_source_ids = declared
+        if not self._needs_fxfx_cluster_catalogue():
+            self._sudakov_source_ids = set()
+            source = getattr(self, "fxfx_catalogue_source", None) or self.lhe_input.path
+            with contextlib.closing(lhe_parser.EventFile(source)) as events:
+                for event in events:
+                    self._sudakov_source_ids.update(event.parse_reweight() or {"1001": event.wgt})
+        self._sudakov_source_ids = set(getattr(self, "_sudakov_source_ids", ())) | declared
+        if not self._sudakov_source_ids:
+            self._sudakov_source_ids.add("1001")
 
-        Args:
-            weights: iterable of up to 3 floats, in SUDAKOV_VARIANT_NAMES order
-                     (central, s_to_rij_off, LL). Missing trailing entries are
-                     padded with 1.0 (no-correction). Inputs longer than 3 are
-                     truncated to the first 3 (backward-compat for callers that
-                     still pass 5-element lists; the dropped entries used to
-                     hold both_off and rij_ge_mw_off, both redundant — see
-                     SUDAKOV_VARIANT_NAMES docstring).
+    def _configure_sudakov_weight_ids(self, source_ids, xis, variant_names=None):
+        """Assign a unique numeric ID to each source, xi index, and variant."""
+        sources = sorted(set(map(str, source_ids)),
+                         key=lambda key: (0, int(key), key) if key.isdigit() else (1, 0, key))
+        names = tuple(variant_names or self.SUDAKOV_VARIANT_NAMES)
+        self._sudakov_xi_list = list(xis)
+        self._sudakov_variant_names = names
+        self._sudakov_source_ids = set(sources)
+        self._sudakov_weight_map = {}
+        self._sudakov_weight_metadata = {}
+        reserved = set(sources) | {str(int(key)) for key in sources if key.isdigit()}
+        slots = [(k, v, source) for k in range(len(xis))
+                 for v in range(len(names)) for source in sources]
+        for k, v, source in slots:
+            if re.fullmatch(r"10[0-9]{2}", source):
+                candidate = str((20 + 5*k + v)*100 + int(source) - 1000)
+                if candidate not in reserved:
+                    self._sudakov_weight_map[k, v, source] = candidate
+                    reserved.add(candidate)
+        candidate = 10000
+        for k, v, source in slots:
+            slot = (k, v, source)
+            if slot not in self._sudakov_weight_map:
+                while str(candidate) in reserved:
+                    candidate += 1
+                self._sudakov_weight_map[slot] = str(candidate)
+                reserved.add(str(candidate))
+                candidate += 1
+            output_id = self._sudakov_weight_map[slot]
+            self._sudakov_weight_metadata[output_id] = (source, k, xis[k], names[v])
+        return list(self._sudakov_weight_metadata)
 
-        Maps existing weights for ξ-index k (driven by the ξ-scan loop):
-            10XX -> (20+5k+v)XX  for v ∈ [0..2], one prefix per variant.
-        Stride remains 5 (not 3) to preserve legacy weight-IDs across ξ-indices:
-            ξ=0 → 20/21/22XX, ξ=1 → 25/26/27XX, ξ=2 → 30/31/32XX.
-        IDs (20+5k+3)XX and (20+5k+4)XX are no longer emitted.
-        Legacy compat: ξ=0, v=0 → 2001 (central NLL), v=1 → 2101 (s_to_rij OFF).
-        """
-        rwgt_dict = copy.deepcopy(event.parse_reweight())
-        _dbg(f"[WEIGHT] _build_sudakov_rwgt_dict ENTER: existing rwgt keys={list(rwgt_dict.keys()) if rwgt_dict else 'EMPTY'}, event.wgt={event.wgt}")
-        if rwgt_dict == {}:
-            rwgt_dict["1001"] = event.wgt
-            _dbg(f"[WEIGHT]   rwgt_dict was EMPTY -> seeded with '1001'={event.wgt}")
+    def _prepare_sudakov_weight_ids(self):
+        """Select the xi scan and variant layout for the configured event mode."""
+        try:
+            self._sudakov_ickkw = int(self.banner.get('run_card', 'ickkw'))
+        except Exception:
+            self._sudakov_ickkw = 0
+        xis = [getattr(self, 'mW2_cluster_scale', 1.5)]
+        names = self.SUDAKOV_LO_VARIANT_NAMES
+        if self._sudakov_ickkw == 3:
+            xis = self.sudakov_xi_scan or xis
+            names = self.SUDAKOV_VARIANT_NAMES
+        elif self.sudakov_xi_scan and len(self.sudakov_xi_scan) > 1:
+            logger.warning("The xi scan requires ickkw=3; using one set of Sudakov variants.")
+        return self._configure_sudakov_weight_ids(self._sudakov_source_ids, xis, names)
 
-        weights = list(weights)
-        _dbg(f"[WEIGHT] Input variant weights: {weights} (len={len(weights)})")
-        if len(weights) < 3:
-            weights = weights + [1.0] * (3 - len(weights))
-            _dbg(f"[WEIGHT]   padded to 3 with trailing 1.0s -> {weights}")
-        elif len(weights) > 3:
-            _dropped = weights[3:]
-            weights = weights[:3]
-            _dbg(f"[WEIGHT]   truncated to first 3 -> {weights} (dropped trailing entries: {_dropped})")
+    def _sudakov_weight_header(self):
+        """Describe every output ID by its full source ID, xi, and variant."""
+        header = getattr(self, "_sudakov_input_header", "")
+        missing = self._sudakov_source_ids - getattr(self, "_sudakov_declared_source_ids", set())
+        if missing:
+            header += '\n<weightgroup name="source_weights">\n'
+            for source in sorted(missing):
+                header += '<weight id=%s>Source weight %s</weight>\n' % (quoteattr(source), escape(source))
+            header += '</weightgroup>\n'
+        header += '\n<weightgroup name="ew_sudakov" weight_name_strategy="includeIdInWeightName">\n'
+        for output_id, (source, k, xi, variant) in self._sudakov_weight_metadata.items():
+            header += ('<weight id=%s source_id=%s xi_index="%d" xi="%s" variant=%s>'
+                       'source=%s xi=%s variant=%s</weight>\n' %
+                       (quoteattr(output_id), quoteattr(source), k, repr(float(xi)), quoteattr(variant),
+                        escape(source), repr(float(xi)), escape(variant)))
+        return header + '</weightgroup>\n'
 
+    def _build_sudakov_rwgt_dict(self, event, weights, variant_names=None):
+        """Multiply each full source weight by the selected Sudakov factors."""
+        sources = event.parse_reweight() or {"1001": event.wgt}
+        names = tuple(variant_names or getattr(self, "_sudakov_variant_names", self.SUDAKOV_VARIANT_NAMES))
         xi_idx = getattr(self, "_current_xi_idx", 0)
-        # Stride 5 preserves legacy weight-IDs; only first 3 slots per ξ-block emitted.
-        base_prefix = 20 + 5 * xi_idx
-        _dbg(f"[XI] xi_idx={xi_idx} (from self._current_xi_idx), base_prefix={base_prefix} (= 20 + 5*{xi_idx})")
-        _dbg(f"[XI]   variant IDs for this ξ will use prefixes {base_prefix}XX..{base_prefix+2}XX (3 variants; slots {base_prefix+3}XX and {base_prefix+4}XX intentionally unused)")
-
-        # 'orig' only on the first ξ-iteration; dispatcher drops it on later merges.
-        rwgt_dict_new = {"orig": event.wgt} if xi_idx == 0 else {}
-        _dbg(f"[WEIGHT]   xi_idx={xi_idx} -> {'INCLUDING' if xi_idx == 0 else 'SKIPPING'} 'orig' key")
-        _dbg(f"[WEIGHT] Expanding {len(rwgt_dict)} source keys × 3 variants:")
-        prior_sudakov = [key for key in rwgt_dict if is_prior_sudakov_id(key)]
-        if prior_sudakov:
-            global _PRIOR_SUD_WARNED
-            if not _PRIOR_SUD_WARNED:
-                logger.warning(
-                    "Input events already carry EW-Sudakov columns %s; "
-                    "excluding them as sources to prevent compounded weights.",
-                    sorted(prior_sudakov)[:6],
-                )
-                _PRIOR_SUD_WARNED = True
-        for el in rwgt_dict:
-            if is_prior_sudakov_id(el):
-                continue
-            ending = el[-2:]
-            _dbg(f"[WEIGHT]   source key '{el}' (ending='{ending}', base_value={rwgt_dict[el]:.6e})")
-            for variant_idx, w in enumerate(weights):
-                prefix = base_prefix + variant_idx
-                new_id = "%d%s" % (prefix, ending)
-                new_val = rwgt_dict[el] * w
-                rwgt_dict_new[new_id] = new_val
-                _dbg(f"[WEIGHT]     variant {variant_idx} ({self.SUDAKOV_VARIANT_NAMES[variant_idx]}): new_id='{new_id}' = {rwgt_dict[el]:.6e} × {w:.6f} = {new_val:.6e}")
-        _dbg(f"[WEIGHT] _build_sudakov_rwgt_dict EXIT: wrote {len(rwgt_dict_new)} keys")
-        return rwgt_dict_new
+        if not hasattr(self, "_sudakov_weight_map"):
+            xis = getattr(self, "sudakov_xi_scan", None) or [getattr(self, "mW2_cluster_scale", 1.5)]
+            self._configure_sudakov_weight_ids(sources, xis, names)
+        factors = list(weights)[:len(names)]
+        factors += [1.0] * (len(names) - len(factors))
+        result = {"orig": event.wgt} if xi_idx == 0 else {}
+        for source, value in sources.items():
+            for variant, factor in enumerate(factors):
+                slot = (xi_idx, variant, str(source))
+                if slot not in self._sudakov_weight_map:
+                    raise ValueError("Sudakov weight layout does not contain source/xi/variant %s" % (slot,))
+                result[self._sudakov_weight_map[slot]] = value * factor
+        return result
 
     def _compute_ewsudakov_fxfx_reweight(self, event, sud_mod):
         """FxFx-aware scalar Sudakov reweighting."""
