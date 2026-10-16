@@ -132,6 +132,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         self.fxfx_clustered_final_states = set()
         self.fxfx_clustered_decay_processes = set()
         self._fxfx_cluster_catalog_ready = False
+        self.fxfx_catalogue_source = None
         self.fxfx_ignore_invariant_checks = True
         self.density_prod_dirname = 'rw_me_density_prod'
         self.density_decay_dirname = 'rw_me_density_decay'
@@ -544,12 +545,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         model = self.banner.get('proc_card', 'model')
         self.load_model(model, True, False)
 
-        # Prepare FxFx clustering data used during reweighting.
-        # Pre-scan must use the LOWEST ξ in the scan so the catalog is built with
-        # the LEAST-clustered (most final-state-particles) stopping points — the
-        # topology closest to the original event, which is already in the standalone
-        # library. Without this, a scan with min(ξ) < default 1.5 could produce
-        # per-event topologies the catalog never saw, triggering KeyError fallback.
+        # Collect the processes required by the complete FxFx xi scan.
         # A second pass over this module's own output would key all old
         # 20XX/21XX/22XX variants by the same two-digit suffix and compound a
         # previous correction into the new one.  Refuse that input up front.
@@ -563,8 +559,6 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 "('_sud' labels in <initrwgt>): refusing to reweight twice. "
                 "Start again from the pre-reweighting event file."
             )
-        if self.inc_sudakov and self.sudakov_xi_scan:
-            self.mW2_cluster_scale = min(self.sudakov_xi_scan)
         self._ensure_fxfx_cluster_catalogue()
 
         if not self.has_standalone_dir:
@@ -622,6 +616,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 sys.path.insert(0, path_me)
                 sud_mod = importlib.import_module('%s.bin.internal.ewsud_pydispatcher' % onedir)
             logger.info('EW Sudakov reweight module imported')
+            self._validate_fxfx_sudakov_catalogue(sud_mod)
 
         if type_rwgt==[]:
             if self.inc_sudakov:

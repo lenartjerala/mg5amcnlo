@@ -25,6 +25,7 @@ The main class FxFxEWSudakovMixin is designed to be mixed into ReweightInterface
 from __future__ import division
 
 import copy
+import contextlib
 import logging
 import math
 import os
@@ -44,6 +45,10 @@ import numpy as np
 # Convenience alias for FourMomentum
 FourMomentum = lhe_parser.FourMomentum
 logger = logging.getLogger("madgraph.various.fxfx_ewsudakov")
+
+
+class MissingSudakovProcessError(Exception):
+    """The compiled Sudakov library does not contain a required process."""
 
 # =============================================================================
 # Module-level debug flag and function
@@ -3673,46 +3678,58 @@ class FxFxEWSudakovMixin:
     def _ensure_fxfx_cluster_catalogue(self):
         if not self._needs_fxfx_cluster_catalogue():
             return
-        if self._fxfx_cluster_catalog_ready:
+        if getattr(self, "lhe_input", None) is None:
             return
-        if not getattr(self, "lhe_input", None):
+        source = getattr(self, "fxfx_catalogue_source", None) or self.lhe_input.path
+        source = os.path.realpath(source)
+        stat = os.stat(source)
+        scale = getattr(self, "mW2_cluster_scale", 1.5)
+        xis = tuple(getattr(self, "sudakov_xi_scan", None) or [scale])
+        catalogue_key = (source, stat.st_size, stat.st_mtime_ns, xis)
+        if (getattr(self, "_fxfx_cluster_catalog_ready", False)
+                and getattr(self, "_fxfx_cluster_catalog_key", None) == catalogue_key):
             return
-        lhe_path = self.lhe_input.path
-        _dbg("Scanning events to collect FxFx clustered final states for Sudakov reweighting")
-        self.lhe_input.seek(0)
-        for event in self.lhe_input:
-            cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
-            if not cluster_result:
-                continue
-            clustered_event, _, groups = cluster_result
-            resonances = ResonanceIdentifier.find_resonances(clustered_event)
-            if not resonances:
-                continue
-            for res_idx, res_pdg in resonances:
-                if res_idx >= len(groups):
-                    continue
-                decay_pdgs = []
-                for lhe_idx in sorted(groups[res_idx]):
-                    if lhe_idx < 1 or lhe_idx > len(event):
-                        continue
-                    part = event[lhe_idx - 1]
-                    if int(getattr(part, "status", 0)) != 1:
-                        continue
-                    decay_pdgs.append(int(getattr(part, "pid", 0)))
-                if len(decay_pdgs) < 2:
-                    continue
-                decay_key = (int(res_pdg), tuple(sorted(decay_pdgs)))
-                self.fxfx_clustered_decay_processes.add(decay_key)
+        self._fxfx_cluster_catalog_ready = False
+        self.fxfx_clustered_final_states = set()
+        self.fxfx_clustered_decay_processes = set()
+        self._init_pole_masses_from_banner()
+        logger.info("Collecting FxFx processes from %s at xi=%s", source, xis)
+        try:
+            with contextlib.closing(lhe_parser.EventFile(source)) as events:
+                for event in events:
+                    for xi in xis:
+                        self.mW2_cluster_scale = xi
+                        cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
+                        if not cluster_result:
+                            continue
+                        clustered_event, _, groups = cluster_result
+                        for res_idx, res_pdg in ResonanceIdentifier.find_resonances(clustered_event):
+                            if res_idx >= len(groups):
+                                continue
+                            decay_pdgs = [
+                                int(event[i - 1].pid) for i in sorted(groups[res_idx])
+                                if 1 <= i <= len(event) and event[i - 1].status == 1
+                            ]
+                            if len(decay_pdgs) >= 2:
+                                self.fxfx_clustered_decay_processes.add(
+                                    (int(res_pdg), tuple(sorted(decay_pdgs))))
+        finally:
+            self.mW2_cluster_scale = scale
+        self._fxfx_cluster_catalog_key = catalogue_key
         self._fxfx_cluster_catalog_ready = True
-        self.lhe_input.close()
-        self.lhe_input = lhe_parser.EventFile(lhe_path)
-        _dbg(
-            f"Identified {len(self.fxfx_clustered_final_states)} unique FxFx clustered final states"
-        )
-        if self.fxfx_clustered_decay_processes:
-            _dbg(
-                f"Identified {len(self.fxfx_clustered_decay_processes)} unique FxFx clustered decay topologies for density"
-            )
+        logger.info("Collected %d FxFx production and %d decay processes",
+                    len(self.fxfx_clustered_final_states), len(self.fxfx_clustered_decay_processes))
+
+    def _validate_fxfx_sudakov_catalogue(self, sud_mod):
+        """Require compiled coverage for each clustered multi-particle process."""
+        if not self._needs_fxfx_cluster_catalogue():
+            return
+        missing = [tag for tag in sorted(self.fxfx_clustered_final_states)
+                   if len(tag[1]) > 1 and tag not in sud_mod.original_pdg_list_dict]
+        if missing:
+            raise MissingSudakovProcessError(
+                "Sudakov library is missing FxFx processes %s. "
+                "Generate the library from the complete event input and xi scan." % missing)
 
     # =========================================================================
     # Process Generation Methods
@@ -3885,8 +3902,10 @@ class FxFxEWSudakovMixin:
 
         try:
             canon = list(sud_mod.original_pdg_list_dict[sorted_tag][1])
-        except Exception as exc:
-            raise KeyError(f"Unknown sorted_tag for Sudakov module: {sorted_tag}") from exc
+        except KeyError as exc:
+            raise MissingSudakovProcessError(
+                "Sudakov library has no process %s. Generate the library from "
+                "the complete event input and xi scan." % (sorted_tag,)) from exc
         _dbg(f"[FXFX]   canonical order={canon}")
 
         # Build permutation: perm[i] = position in canon where mapped_order[1][i] should go
@@ -4235,9 +4254,6 @@ class FxFxEWSudakovMixin:
         _dbg("[SCALAR] calling _prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)...")
         try:
             prep = self._prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)
-        except KeyError as exc:
-            _dbg(f"[FALLBACK] _prepare_fxfx_sudakov_inputs raised KeyError({exc}) -> passthrough, returning 3×1.0")
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
         except RuntimeError:
             _dbg("[FATAL] _prepare_fxfx_sudakov_inputs: order in particle momenta does not match MG convention -> exit(3)")
             sys.exit(3)
@@ -4638,10 +4654,6 @@ class FxFxEWSudakovMixin:
                         )
                 if mw2 is not None and min_abs is not None:
                     _dbg(f"     min|s_ij|={min_abs:.6e}, MW^2={mw2:.6e}")
-        except KeyError as exc:
-            _dbg(f"  -> KeyError: {exc}, returning weight=1 pass-through (nominal)")
-            density_logger.log_event("passthrough_keyerror", [], 0, 1.0)
-            return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
         except RuntimeError:
             _dbg("  -> RuntimeError: momentum order mismatch!")
             sys.exit(3)

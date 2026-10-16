@@ -2275,6 +2275,11 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
 
         # load the name of the event file
         args = self.split_arg(line) 
+        fxfx_catalogue_source = None
+        for arg in list(args):
+            if arg.startswith('--fxfx-catalogue-source='):
+                fxfx_catalogue_source = arg.split('=', 1)[1]
+                args.remove(arg)
         if plugin and '--plugin=' not in line:
             args.append('--plugin=%s' % plugin)
         
@@ -2405,6 +2410,7 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
                         else:
                             stdout = open(pjoin(self.me_dir,'Events', self.run_name, 'reweight.log'),'w')
                         new_command.append('--multicore=create')
+                        new_command.append('--fxfx-catalogue-source=%s' % os.path.abspath(new_args[0]))
                     else:
                         stdout = devnull
                         stdout = subprocess.DEVNULL
@@ -2486,6 +2492,7 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
         reweight_cmd.raw_input=False # probably useless ...
         reweight_cmd.me_dir = self.me_dir
         reweight_cmd.multicore = multicore #allow the directory creation or not
+        reweight_cmd.fxfx_catalogue_source = fxfx_catalogue_source
         reweight_cmd.import_command_file(path)
         reweight_cmd.do_quit('')
 
@@ -8674,5 +8681,4 @@ def scanparamcardhandling(input_path=lambda obj: pjoin(obj.me_dir, 'Cards', 'par
 
         return new_fct
     return decorator    
-
 
