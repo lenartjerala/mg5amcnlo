@@ -537,7 +537,7 @@ def _boost_along_direction(p, beta, direction):
 
 
 def _apply_fxfx_frame_transform(momentum, frame_transform):
-    """Apply the boost/rotation recorded by _prepare_fxfx_sudakov_inputs.
+    """Apply ordered clustering and event-preparation Lorentz operations.
 
     Event.boost uses the HELAS boost convention: it negates the spatial part
     of the total incoming momentum before calling FourMomentum.boost.  Mirror
@@ -554,6 +554,13 @@ def _apply_fxfx_frame_transform(momentum, frame_transform):
             transformed = transformed.boost(pboost)
         elif operation == "rotate_to_z":
             transformed = transformed.rotate_to_z(prot=FourMomentum(reference))
+        elif operation == "pt_boost":
+            transformed = transformed.pt_boost(pboost=FourMomentum(reference))
+        elif operation == "boost_along_direction":
+            beta, direction = reference
+            transformed = _boost_along_direction(transformed, beta, direction)
+        elif operation == "boost_from_rest":
+            transformed = transformed.boost(FourMomentum(reference))
         else:
             raise ValueError("Unknown FxFx frame operation: %s" % operation)
     return transformed
@@ -563,22 +570,21 @@ def _transform_decay_products_to_onshell(
     decay_momenta, original_res_p4, onshell_res_p4, frame_transform=None,
 ):
     """
-    Transform decay products from original (off-shell) resonance kinematics
-    to on-shell resonance kinematics.
+    Project decay products onto a target resonance momentum.
 
     Algorithm (scaling):
-    1. Apply the production event's lab -> prepared-frame Lorentz map
-    2. Boost decay products to the transformed original resonance rest frame
+    1. Apply the supplied common Lorentz map
+    2. Boost decay products to their parent rest frame
     3. Scale momenta to match on-shell mass
     4. Boost from on-shell rest frame to the prepared frame
 
     Args:
         decay_momenta: List of FourMomentum for decay products
-        original_res_p4: Original resonance 4-momentum (off-shell, from original event)
+        original_res_p4: Sum of the supplied decay-product momenta
         onshell_res_p4: On-shell resonance 4-momentum (from FKS-clustered event)
         frame_transform: Ordered boost/rotation operations recorded while
-            preparing the clustered production event.  If supplied, the
-            original decay system is transported with that same Lorentz map
+            preparing the clustered production event. If supplied, the
+            input decay system is transported with that same Lorentz map
             before the on-shell adjustment.
 
     Returns:
@@ -587,11 +593,7 @@ def _transform_decay_products_to_onshell(
     if not decay_momenta:
         return []
 
-    # The on-shell mother already lives in the prepared partonic-CM frame.
-    # Move the original lab-frame decay system into that frame with the exact
-    # same Lorentz map first.  Without this step the two rest-frame boosts use
-    # non-collinear axes in different coordinate frames, introducing a
-    # spurious Wigner rotation even when there is no mass reshuffling.
+    # Express the input decay system and the target parent in the same frame.
     if frame_transform:
         decay_momenta = [
             _apply_fxfx_frame_transform(p, frame_transform) for p in decay_momenta
@@ -766,6 +768,54 @@ def _transform_decay_products_to_onshell(
     return lab_momenta
 
 
+def _transport_decay_products(products, frame_transform):
+    """Transport leaf momenta while retaining their original LHE labels."""
+    return {
+        label: _apply_fxfx_frame_transform(momentum, frame_transform)
+        for label, momentum in products.items()
+    }
+
+
+def _project_cluster_decay_products(children, momenta, mother):
+    """Project two children onto a parent and transport each child's leaves.
+
+    A timelike parent's two-body projection preserves child masses and
+    rest-frame directions. Lightlike jets carry collinear constituents with
+    the input energy fractions.
+    Each composite child carries its leaves through the same canonical boosts,
+    preserving the invariant masses of its internal decay systems.
+    """
+    source_parent = momenta[0] + momenta[1]
+    if _m2(mother) <= 1e-12 * mother.E**2:
+        # A lightlike jet carries collinear constituents with positive energy shares.
+        leaves = dict(children[0])
+        leaves.update(children[1])
+        total_energy = sum(p.E for p in leaves.values())
+        return {
+            label: FourMomentum([component * p.E / total_energy
+                                 for component in (mother.E, mother.px, mother.py, mother.pz)])
+            for label, p in leaves.items()
+        }
+    projected = _transform_decay_products_to_onshell(
+        momenta, source_parent, mother,
+    )
+    products = {}
+    for leaves, source, target in zip(children, momenta, projected):
+        if len(leaves) == 1:
+            products[next(iter(leaves))] = FourMomentum(target)
+        elif leaves and _m2(source) <= 1e-12 * source.E**2:
+            products.update({
+                label: FourMomentum([component * p.E / source.E
+                                     for component in (target.E, target.px, target.py, target.pz)])
+                for label, p in leaves.items()
+            })
+        elif leaves:
+            products.update(_transport_decay_products(leaves, [
+                ("boost_to_cm", source), ("boost_from_rest", target),
+            ]))
+    return products
+
+
 def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
     """
     FKS initial-state singularity mapping (Section 5.1 of FKS paper).
@@ -794,6 +844,7 @@ def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
         'final_state': dict {idx: FourMomentum} for all FS particles (except removed)
         'sqrt_s_new': new CM energy
         'method': description of method used
+        'final_state_transform': ordered Lorentz operations on surviving FS particles
     """
     p_initial = orig_momenta[0] + orig_momenta[1]
     p_radiation = orig_momenta[fks_j]
@@ -824,6 +875,7 @@ def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
         "final_state": {},
         "sqrt_s_new": sqrt_s,
         "method": "fks_isr_cm_boost",
+        "final_state_transform": [],
     }
 
     # ISR MAPPING: Boost all particles to new CM frame (p_clustered rest frame)
@@ -837,6 +889,7 @@ def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
     # which is the correct convention for a Born-level LHE event (beams along z).
     # The downstream Sudakov computation boosts to CM, which is frame-invariant.
     if needs_pt_boost:
+        result["final_state_transform"] = [("pt_boost", FourMomentum(p_clustered))]
         # Step 1: pT boost to remove transverse momentum of p_clustered
         after_pt = [p.pt_boost(pboost=p_clustered) for p in orig_momenta]
         p_clustered_after_pt = p_clustered.pt_boost(pboost=p_clustered)
@@ -930,6 +983,7 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         'mother': FourMomentum of clustered mother (on mass shell M)
         'beams': [beam0, beam1] (unchanged for FSR)
         'spectators': dict {idx: FourMomentum} for boosted spectators
+        'spectator_transform': ordered Lorentz operations on spectators
         'method': description of method used
     """
     mother_pid = abs(moth[0]["id"])
@@ -948,6 +1002,7 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     result = {
         "beams": [FourMomentum(orig_momenta[0]), FourMomentum(orig_momenta[1])],
         "spectators": {},
+        "spectator_transform": [],
     }
 
     # Compute invariant mass of the clustering pair (before any reshuffling)
@@ -1279,6 +1334,7 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         _cluster_dbg(f"  [FKS FSR] β={beta:.6f}, n̂=({n_rec[0]:.4f}, {n_rec[1]:.4f}, {n_rec[2]:.4f})")
 
     # Apply boost B to each spectator: k̄ᵢ = B kᵢ
+    result["spectator_transform"] = [("boost_along_direction", (beta, n_rec))]
     k_rec_boosted = _boost_along_direction(k_rec, beta, n_rec)
 
     for idx in spectator_indices:
@@ -1352,6 +1408,7 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
 
     # Save original momenta
     orig_momenta = [FourMomentum(p) for p in event]
+    decay_products = getattr(event, "_fxfx_decay_products", None)
 
     cluster_type = "ISR" if fks_i <= 1 else "FSR"
     _cluster_dbg(
@@ -1362,6 +1419,12 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
         # ISR: FKS Section 5.1 mapping
         isr_result = _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta)
         method = isr_result.get("method", "fks_isr_unknown")
+
+        if decay_products is not None:
+            for idx in isr_result["final_state"]:
+                decay_products[idx] = _transport_decay_products(
+                    decay_products[idx], isr_result["final_state_transform"],
+                )
 
         # Apply results to event
         event[0].set_momentum(isr_result["beams"][0])
@@ -1376,6 +1439,17 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
         # FSR: FKS Section 5.2 mapping
         fks_result = _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta)
         method = fks_result.get("method", "fks_fsr_unknown")
+
+        if decay_products is not None:
+            decay_products[fks_i] = _project_cluster_decay_products(
+                [decay_products[fks_i], decay_products[fks_j]],
+                [orig_momenta[fks_i], orig_momenta[fks_j]],
+                fks_result["mother"],
+            )
+            for idx in fks_result["spectators"]:
+                decay_products[idx] = _transport_decay_products(
+                    decay_products[idx], fks_result["spectator_transform"],
+                )
 
         # Apply results to event
         event[0].set_momentum(fks_result["beams"][0])
@@ -1401,6 +1475,8 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
 
     # Remove radiation particle
     event.pop(to_remove)
+    if decay_products is not None:
+        decay_products.pop(to_remove)
 
     # Per-launch accounting and a cheap momentum-conservation counter, gated so
     # each event is counted only on its first clustering pass (see module
@@ -2596,7 +2672,7 @@ class FxFxEWSudakovMixin:
 
         return steps
 
-    def _apply_forced_clustering(self, event, steps):
+    def _apply_forced_clustering(self, event, steps, track_decays=False):
         """
         Apply forced clustering steps with FKS kinematic reshuffling.
 
@@ -2609,6 +2685,7 @@ class FxFxEWSudakovMixin:
         Args:
             event: LHE event object (will be modified)
             steps: List[ForcedClusterStep] from _generate_forced_cluster_steps()
+            track_decays: Carry decay leaf momenta through each mapping
 
         Returns:
             Tuple of (modified_event, groups)
@@ -2616,6 +2693,13 @@ class FxFxEWSudakovMixin:
             - groups: List of sets mapping positions to original LHE indices
         """
         buff_event = copy.deepcopy(event)
+        decay_products = None
+        if track_decays:
+            decay_products = [
+                {i + 1: FourMomentum(p)} if p.status == 1 else {}
+                for i, p in enumerate(event)
+            ]
+            buff_event._fxfx_decay_products = decay_products
 
         # Clustering-quality history for this stage (consumed by
         # _cluster_fxfx_event_internal, which seeds its own list from it)
@@ -2742,6 +2826,9 @@ class FxFxEWSudakovMixin:
                 if _FKS_COUNT_ACTIVE:
                     FKS_METHOD_COUNTS["forced_children_not_active"] += 1
                 forced_methods.append("forced_children_not_active")
+                if decay_products is not None:
+                    decay_products[mother_pos] = dict(decay_products[child1_pos])
+                    decay_products[mother_pos].update(decay_products[child2_pos])
             else:
                 child1_active = buff_to_active[child1_pos]
                 child2_active = buff_to_active[child2_pos]
@@ -2790,6 +2877,26 @@ class FxFxEWSudakovMixin:
 
                 # Call FKS FSR mapping in CM frame
                 fks_result = _fks_fsr_mapping(child1_active, child2_active, moth, orig_momenta_cm)
+
+                if decay_products is not None:
+                    to_cm = [("boost_along_direction", (beta_cm, _z_hat))]
+                    from_cm = [("boost_along_direction", (-beta_cm, _z_hat))]
+                    children = [
+                        _transport_decay_products(decay_products[pos], to_cm)
+                        for pos in (child1_pos, child2_pos)
+                    ]
+                    projected = _project_cluster_decay_products(
+                        children,
+                        [orig_momenta_cm[child1_active], orig_momenta_cm[child2_active]],
+                        fks_result["mother"],
+                    )
+                    decay_products[mother_pos] = _transport_decay_products(projected, from_cm)
+                    spectator_transform = to_cm + fks_result["spectator_transform"] + from_cm
+                    for active_idx in fks_result["spectators"]:
+                        pos = active_to_buff[active_idx]
+                        decay_products[pos] = _transport_decay_products(
+                            decay_products[pos], spectator_transform,
+                        )
 
                 _dbg(f"[FORCED]   FKS method: {fks_result['method']}")
 
@@ -2872,6 +2979,8 @@ class FxFxEWSudakovMixin:
             for pos in children_pos:
                 buff_event.pop(pos)
                 groups.pop(pos)
+                if decay_products is not None:
+                    decay_products.pop(pos)
 
             # Rebuild position mappings
             pos_to_lhe = {}
@@ -2952,6 +3061,7 @@ class FxFxEWSudakovMixin:
             event: LHE event object
             record_tag: If True, record the sorted_tag for later use
             return_groups: If True, return groups tracking original LHE indices
+                and carry decay leaf momenta on the returned event
 
         Returns:
             If return_groups=False: (clustered_event, sorted_tag) or None
@@ -2987,7 +3097,9 @@ class FxFxEWSudakovMixin:
 
             if forced_steps:
                 # Apply forced clustering to restore hard process
-                hard_event, forced_groups = self._apply_forced_clustering(event, forced_steps)
+                hard_event, forced_groups = self._apply_forced_clustering(
+                    event, forced_steps, track_decays=return_groups,
+                )
 
                 _dbg(
                     f"[CLUSTER] Forced clustering complete, hard process has {len(hard_event)} particles"
@@ -3081,6 +3193,14 @@ class FxFxEWSudakovMixin:
         ]
         for ip in reversed(to_pop):
             buff_event.pop(ip)
+            if hasattr(buff_event, "_fxfx_decay_products"):
+                buff_event._fxfx_decay_products.pop(ip)
+
+        if return_groups and not hasattr(buff_event, "_fxfx_decay_products"):
+            buff_event._fxfx_decay_products = [
+                {i + 1: FourMomentum(p)} if p.status == 1 else {}
+                for i, p in enumerate(event) if i not in to_pop
+            ]
 
         # Clustering-quality history: seed with any methods recorded by the
         # MadSpin forced-clustering stage, then append one entry per FxFx step.
@@ -5003,13 +5123,9 @@ class FxFxEWSudakovMixin:
         """
         Build a minimal decay event (resonance -> clustered decay products).
 
-        IMPORTANT: The decay products from the original event have momenta that sum
-        to the original (off-shell) resonance momentum, not the on-shell momentum
-        from FKS clustering. We transform the decay products to match the on-shell
-        resonance while preserving decay angles in the resonance rest frame.
-
-        This ensures the decay matrix C is evaluated in the same helicity basis
-        as the production matrix B.
+        Clustering supplies leaf momenta transported with each recoil and parent
+        projection. Event preparation supplies the final CM boost and rotation.
+        Without stored transport, the LHE momenta define the decay projection.
         """
         decay_event = lhe_parser.Event()
         decay_event.wgt = getattr(full_event, "wgt", 0.0)
@@ -5023,7 +5139,8 @@ class FxFxEWSudakovMixin:
             f"     [decay_build] on-shell res_p4=({res_part.E:.6e},{res_part.px:.6e},{res_part.py:.6e},{res_part.pz:.6e})"
         )
 
-        # Collect original decay product momenta and metadata
+        # LHE labels identify the transported leaves and their particle metadata.
+        transported = getattr(clustered_event, "_fxfx_decay_products", None)
         original_momenta = []
         decay_pids = []
         decay_masses = []
@@ -5033,7 +5150,8 @@ class FxFxEWSudakovMixin:
             if lhe_idx < 1 or lhe_idx > len(full_event):
                 continue
             src = full_event[lhe_idx - 1]
-            p4 = FourMomentum([float(src.E), float(src.px), float(src.py), float(src.pz)])
+            p4 = (FourMomentum(transported[res_idx][lhe_idx]) if transported is not None
+                  else FourMomentum(src))
             original_momenta.append(p4)
             decay_pids.append(int(getattr(src, "pid", 0)))
             decay_masses.append(float(getattr(src, "mass", 0.0)))
@@ -5042,14 +5160,14 @@ class FxFxEWSudakovMixin:
             sum_py += p4.py
             sum_pz += p4.pz
 
-        # Original resonance momentum (sum of original decay products)
+        # Parent momentum carried by the input daughters.
         original_res_p4 = FourMomentum([sum_E, sum_px, sum_py, sum_pz])
         original_m2 = sum_E**2 - sum_px**2 - sum_py**2 - sum_pz**2
         original_m = math.sqrt(max(0, original_m2))
         _dbg(
-            f"     [decay_build] original res_p4=({sum_E:.6e},{sum_px:.6e},{sum_py:.6e},{sum_pz:.6e})"
+            f"     [decay_build] input res_p4=({sum_E:.6e},{sum_px:.6e},{sum_py:.6e},{sum_pz:.6e})"
         )
-        _dbg(f"     [decay_build] original invariant mass = {original_m:.4f} GeV")
+        _dbg(f"     [decay_build] input invariant mass = {original_m:.4f} GeV")
         _dbg(
             f"     [decay_build] delta (before transform)=({res_part.E - sum_E:.6e},{res_part.px - sum_px:.6e},{res_part.py - sum_py:.6e},{res_part.pz - sum_pz:.6e})"
         )
@@ -5105,7 +5223,7 @@ class FxFxEWSudakovMixin:
         _dbg("     [decay_build] MASS CHECK:")
         _dbg(f"       Resonance mass (on-shell): {res_m:.4f} GeV")
         _dbg(f"       Sum of decay products mass: {sum_m:.4f} GeV")
-        _dbg(f"       Original invariant mass: {original_m:.4f} GeV")
+        _dbg(f"       Input invariant mass: {original_m:.4f} GeV")
         _dbg(f"       Pole mass target: {_get_mother_mass(res_pdg):.4f} GeV")
         _dbg("     [decay_build] DECAY EVENT STRUCTURE:")
         for i, p in enumerate(decay_event):
