@@ -68,6 +68,17 @@ MAX_DENSITY_RESONANCES = 10
 MAX_DENSITY_ALLOW_HEL = 300
 
 
+def limit_sudakov_factors(factors, accounting_key=None):
+    """Set all factors to unity when the central factor exceeds 200 in magnitude."""
+    factors = list(factors)
+    if abs(factors[0]) > 200:
+        _dbg(f"Neutralizing all Sudakov factors: |central|={abs(factors[0]):g} exceeds 200")
+        if accounting_key is not None and _FKS_COUNT_ACTIVE:
+            FKS_QUALITY_COUNTS[accounting_key] += 1
+        return [1.0] * len(factors)
+    return factors
+
+
 def density_dimensions_supported(total_dim, nres):
     """Return whether a density call fits every fixed generated buffer."""
     return (
@@ -4320,14 +4331,7 @@ class FxFxEWSudakovMixin:
             _dbg(f"[5SUD] WARNING: Born |res[0]|={abs(res[0]):.3e} < 1e-30 -> setting all 3 sudrats to 1.0 (no reweight)")
             sudrats = [1.0] * 3
 
-        # Damp the central; if it runaway, neutralize the entire variant set so
-        # downstream ratios across variants stay sane.
-        _dbg(f"[5SUD] runaway-damping check: |sudrats[0] central|={abs(sudrats[0]):.3f} (threshold 200)")
-        if abs(sudrats[0]) > 200:
-            _dbg(f"[5SUD] RUNAWAY DAMPING engaged: |central|={abs(sudrats[0]):.3f} > 200; pre-damping sudrats={sudrats}; setting all 3 to 1.0")
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_runaway_damped_scalar"] += 1
-            sudrats = [1.0] * 3
+        sudrats = limit_sudakov_factors(sudrats, "events_runaway_damped_scalar")
 
         # Final output (matching density path format)
         _dbg("-" * 70)
@@ -4993,31 +4997,8 @@ class FxFxEWSudakovMixin:
             _dbg(f"  -> EXCEPTION in density Sudakov: {e}")
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
-        # Damp overly large ratios
-        if abs(weight) > 200:
-            _dbg(f"  -> WARNING: weight {weight:.6f} > 200, capping to 1.0")
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_runaway_damped_density"] += 1
-            weight = 1.0
-        if weight_var is not None and abs(weight_var) > 200:
-            _dbg(f"  -> WARNING: weight_var {weight_var:.6f} > 200, capping to 1.0")
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_runaway_damped_density_var"] += 1
-            weight_var = 1.0
-
-        # Compute the sherpa_qed variant (res[1], sud_mod=0 in the Fortran kernel
-        # — full NLL Sudakov with QED logs dropped Sherpa-style) via the scalar
-        # ewsudakov() Fortran call. density_sudakov() emits only sud_mod=1
-        # (res[2], QED excluded) and s_to_rij_off (res[3]); it does not emit
-        # the sud_mod=0 slot. Earlier versions padded this slot with 1.0,
-        # silently turning the downstream `ewsl_sherpa_qed` curves into pure
-        # baseline for every event taking the density path.
-        # (Historical note: this slot was previously labelled "LL" / "leading-log
-        # only" in this file and in plot legends — that labelling was wrong; the
-        # Fortran kernel has no LL-only mode. See ewsudakov_functions.f:1-4.)
-        # On the scalar-fallback path (use_density_path=False) we already
-        # called ewsudakov() at the fallback site above; we re-call here for
-        # code uniformity rather than threading a result across branches.
+        # The scalar kernel supplies the Sherpa QED factor; the density kernel
+        # supplies the central and s_to_rij_off factors.
         weight_sherpa_qed = 1.0
         try:
             res_for_sq = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
@@ -5035,9 +5016,9 @@ class FxFxEWSudakovMixin:
         except Exception as exc:  # noqa: BLE001 — robustness: never let extraction failure abort the event
             _dbg(f"  -> WARNING: sherpa_qed extraction via scalar ewsudakov() failed ({exc}); using 1.0")
             weight_sherpa_qed = 1.0
-        if abs(weight_sherpa_qed) > 200:
-            _dbg(f"  -> WARNING: weight_sherpa_qed {weight_sherpa_qed:.6f} > 200, capping to 1.0")
-            weight_sherpa_qed = 1.0
+        weight, weight_var, weight_sherpa_qed = limit_sudakov_factors(
+            [weight, weight_var if weight_var is not None else 1.0, weight_sherpa_qed],
+            "events_runaway_damped_density")
 
         # Build output dictionary
         _dbg("-" * 70)
@@ -5048,15 +5029,7 @@ class FxFxEWSudakovMixin:
         _dbg(f"Event original weight: {event.wgt}")
         _dbg(f"Reweighted = {event.wgt} * {weight:.6f} = {event.wgt * weight:.6e}")
         _dbg("=" * 70)
-        # Density path computes central (sud_mod=1) and s_to_rij OFF via
-        # density_sudakov(); sherpa_qed (sud_mod=0) is computed by an
-        # additional scalar ewsudakov() call above.
-        # The retired variants v=3 (both_off) and v=4 (rij_ge_mw_off) remain
-        # algebraically degenerate with v=1 and v=0 after the small_inv
-        # pre-filter — _build_sudakov_rwgt_dict drops them by truncating to
-        # the first 3 entries (see SUDAKOV_VARIANT_NAMES at L3560).
-        wv = weight_var if weight_var is not None else 1.0
-        return self._build_sudakov_rwgt_dict(event, [weight, wv, weight_sherpa_qed])
+        return self._build_sudakov_rwgt_dict(event, [weight, weight_var, weight_sherpa_qed])
 
     # =========================================================================
     # Decay Density Matrix Methods

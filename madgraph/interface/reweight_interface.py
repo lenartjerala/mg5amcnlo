@@ -1440,24 +1440,11 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         sudrat3 = 1. + res[4]/res[0] # SUD1 (SKD_weak) s_to_rij OFF  rij_ge_mw OFF
         sudrat4 = 1. + res[5]/res[0] # SUD1 (SKD_weak) s_to_rij ON  rij_ge_mw OFF
 
-        # Damp when the Sudakov weights are too large (in abs value)
-        large_sud_error=False
-        if abs(sudrat1) > 200:
-            logger.info('ERROR: event will not be reweighted because Sudakov ratio is too large: %s ' %sudrat1)
-            logger.info(buff_event)
-            sudrat0 = 1.
-            sudrat1 = 1.
-            sudrat2 = 1.
-            sudrat3 = 1.
-            sudrat4 = 1.
-            large_sud_error = True
-
-        # Dummy step: needed to read in the parse_reweight function
+        factors = fxfx_ewsudakov.limit_sudakov_factors(
+            [sudrat1, sudrat2, sudrat0, sudrat3, sudrat4])
         event.rescale_weights(1.)
-
         names = getattr(self, '_sudakov_variant_names', self.SUDAKOV_LO_VARIANT_NAMES)
-        return self._build_sudakov_rwgt_dict(
-            event, [sudrat1, sudrat2, sudrat0, sudrat3, sudrat4], names)
+        return self._build_sudakov_rwgt_dict(event, factors, names)
 
     def get_pdg_tuple(self, pdgs, nincoming):
         """write a tuple of 2 tuple, with the incoming particles unsorted
