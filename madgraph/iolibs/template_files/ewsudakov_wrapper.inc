@@ -245,7 +245,7 @@ if (firsttime_hel(ihel)) then
     firsttime_hel(ihel) = .false.
 endif
 
-C Save previous accumulated values for per-helicity comparison
+C Snapshot accumulated components for the helicity comparison
 lsc_prev = amp_split_ewsud_lsc(1)
 ssc_prev = amp_split_ewsud_ssc(1)
 xxc_prev = amp_split_ewsud_xxc(1)
