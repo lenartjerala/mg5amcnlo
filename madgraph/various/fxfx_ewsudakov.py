@@ -1560,6 +1560,44 @@ def _fortran_to_python_hel_permutation(res_dims):
     return perm
 
 
+def unpack_density_triangle(packed, len_tri=None):
+    """Full density matrix from the packed triangle returned by GET_DENSITY.
+
+    GET_ALL_INTER stores the upper triangle row by row,
+    packed[i*n + k - i*(i+1)//2] = B[i,k] = M_i * conj(M_k) for i <= k
+    (summed over colours and over the helicities not in the matrix).
+    The upper triangle (diagonal included) is kept as stored and the lower
+    triangle is filled with B[k,i] = conj(B[i,k]), giving B[h,h'] = M_h M*_h'
+    as DensityMatrix.apply_sudakov and DensityMatrix.contract use it.
+    Density_functions.DensityMatrixObservables.square_matrix returns the
+    transpose of this matrix.
+
+    Args:
+        packed: 1D sequence of n(n+1)/2 complex entries
+        len_tri: Number of leading entries of ``packed`` to use (all if None)
+
+    Returns:
+        Complex (n, n) numpy array
+
+    Raises:
+        ValueError: If the entries used are not a 1D line of n(n+1)/2
+            entries with n >= 1
+    """
+    line = np.asarray(packed, dtype=np.complex128)
+    if line.ndim == 1 and len_tri is not None:
+        line = line[:len_tri]
+    n = (int(math.sqrt(8 * line.size + 1)) - 1) // 2
+    if line.ndim != 1 or n < 1 or n * (n + 1) // 2 != line.size:
+        raise ValueError(
+            f"Packed density triangle of shape {line.shape} is not a 1D line of n(n+1)/2 entries"
+        )
+    matrix = np.zeros((n, n), dtype=np.complex128)
+    matrix[np.triu_indices(n)] = line
+    lower = np.tril_indices(n, -1)
+    matrix[lower] = np.conj(matrix.T[lower])
+    return matrix
+
+
 # =============================================================================
 # DensityHelper Class - Adapter for Valentin's DensityInterface
 # =============================================================================
@@ -1672,7 +1710,6 @@ class DensityHelper:
         _dbg(
             f"[DensityHelper.compute_density_matrix] ENTER target_pdgs={target_pdgs}, res_dims={res_dims}"
         )
-        import madgraph.various.Density_functions as dens
 
         # Configure for this specific calculation
         self._configure_for_pdgs(target_pdgs, res_dims)
@@ -1896,21 +1933,20 @@ class DensityHelper:
                 f"[DensityHelper] Fortran returned, production_matrix type={type(production_matrix)}"
             )
 
-            # Convert to full matrix using Valentin's utility
-            # Use integer division (//) to ensure len_user_input is an int
+            # Convert the packed upper triangle to the full matrix
+            # Use integer division (//) to ensure len_tri is an int
             len_tri = self.number_combinations * (self.number_combinations + 1) // 2
             _dbg(
-                f"[DensityHelper] Calling DensityMatrixObservables with len_tri={len_tri}, production_matrix shape={production_matrix.shape if hasattr(production_matrix, 'shape') else len(production_matrix)}"
+                f"[DensityHelper] Calling unpack_density_triangle with len_tri={len_tri}, production_matrix shape={production_matrix.shape if hasattr(production_matrix, 'shape') else len(production_matrix)}"
             )
             # Debug: show raw Fortran output (first few elements)
             if hasattr(production_matrix, "__len__") and len(production_matrix) >= len_tri:
                 _dbg(
                     f"[DensityHelper] Raw Fortran output (first {len_tri}): {production_matrix[:len_tri]}"
                 )
-            rho_instance = dens.DensityMatrixObservables(production_matrix, len_tri)
-            # Use square_matrix() to convert triangular storage to full 2D matrix
-            me_value = rho_instance.square_matrix()
-            _dbg(f"[DensityHelper] square_matrix shape: {np.array(me_value).shape}")
+            # Upper triangle as stored (B[i,k] = M_i conj(M_k)), lower by conjugation
+            me_value = unpack_density_triangle(production_matrix, len_tri)
+            _dbg(f"[DensityHelper] unpacked matrix shape: {np.array(me_value).shape}")
 
         return np.array(me_value) if me_value is not None else None
 

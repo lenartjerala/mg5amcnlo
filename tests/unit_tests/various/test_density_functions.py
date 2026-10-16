@@ -1,7 +1,8 @@
 ################################################################################
 #
 # Regression tests for the triangular density-matrix convention shared by the
-# generated Fortran GET_INTER routines and Density_functions.py.
+# generated Fortran GET_INTER routines and
+# fxfx_ewsudakov.unpack_density_triangle.
 #
 ################################################################################
 from __future__ import division
@@ -42,11 +43,7 @@ class TestFortranTriangleConvention(unittest.TestCase):
         amplitudes = rng.normal(size=9) + 1j * rng.normal(size=9)
         expected = np.outer(amplitudes, np.conj(amplitudes))
 
-        reconstructed = np.asarray(
-            density_functions.DensityMatrixObservables(
-                _upper_triangle(expected)
-            ).square_matrix()
-        )
+        reconstructed = fx.unpack_density_triangle(_upper_triangle(expected))
 
         np.testing.assert_allclose(reconstructed, expected, rtol=1e-13, atol=1e-13)
         self.assertGreater(
@@ -65,16 +62,8 @@ class TestFortranTriangleConvention(unittest.TestCase):
         c_true += 0.25 * np.trace(c_true).real / 9.0 * np.eye(9)
         delta = 0.08 * rng.normal(size=9) + 0.05j * rng.normal(size=9)
 
-        b_reconstructed = np.asarray(
-            density_functions.DensityMatrixObservables(
-                _upper_triangle(b_true)
-            ).square_matrix()
-        )
-        c_reconstructed = np.asarray(
-            density_functions.DensityMatrixObservables(
-                _upper_triangle(c_true)
-            ).square_matrix()
-        )
+        b_reconstructed = fx.unpack_density_triangle(_upper_triangle(b_true))
+        c_reconstructed = fx.unpack_density_triangle(_upper_triangle(c_true))
 
         def weight(b_matrix, c_matrix, correction):
             b = fx.DensityMatrix.from_full_matrix(b_matrix, [24, -24])
@@ -106,13 +95,47 @@ class TestFortranTriangleConvention(unittest.TestCase):
             conjugated_matrices_real_delta_result, real_delta_result, places=13
         )
 
+    def test_square_matrix_is_transpose_of_unpacked_triangle(self):
+        """DensityMatrixObservables.square_matrix is the transpose of the
+        unpacked triangle, and its elementwise conjugate for a Hermitian line."""
+        rng = np.random.default_rng(29)
+        for dim in (2, 3, 4, 6, 9):
+            amplitudes = rng.normal(size=dim) + 1j * rng.normal(size=dim)
+            hermitian = np.outer(amplitudes, np.conj(amplitudes))
+            np.fill_diagonal(hermitian, hermitian.diagonal().real)
+            line = _upper_triangle(hermitian)
+            unpacked = fx.unpack_density_triangle(line)
+            observables = density_functions.DensityMatrixObservables(line)
+            square = np.asarray(observables.square_matrix())
+
+            np.testing.assert_array_equal(square, unpacked.T)
+            np.testing.assert_array_equal(square, np.conj(unpacked))
+            self.assertGreater(np.max(np.abs(square - unpacked)), 1.0e-6)
+
+    def test_unpacked_triangle_keeps_stored_entries_up_to_len_tri(self):
+        """The upper triangle, diagonal included, is the stored line, the
+        lower triangle its conjugate, and entries past len_tri are unused."""
+        rng = np.random.default_rng(31)
+        for dim in (1, 2, 3, 9, 27):
+            size = dim * (dim + 1) // 2
+            line = rng.normal(size=size) + 1j * rng.normal(size=size)
+            extra = rng.normal(size=7) + 1j * rng.normal(size=7)
+
+            unpacked = fx.unpack_density_triangle(line)
+            truncated = fx.unpack_density_triangle(np.concatenate([line, extra]), size)
+
+            self.assertEqual(unpacked.shape, (dim, dim))
+            self.assertEqual(unpacked.dtype, np.complex128)
+            np.testing.assert_array_equal(unpacked[np.triu_indices(dim)], line)
+            lower = np.tril_indices(dim, -1)
+            np.testing.assert_array_equal(unpacked[lower], np.conj(unpacked.T[lower]))
+            self.assertEqual(truncated.tobytes(), unpacked.tobytes())
+
 
 def _density(amplitudes, pdgs):
     """DensityMatrix built from amplitudes through the packed-triangle path."""
     line = _upper_triangle(np.outer(amplitudes, np.conj(amplitudes)))
-    matrix = np.asarray(
-        density_functions.DensityMatrixObservables(line).square_matrix()
-    )
+    matrix = fx.unpack_density_triangle(line)
     return fx.DensityMatrix.from_full_matrix(matrix, pdgs)
 
 
