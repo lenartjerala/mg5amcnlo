@@ -73,8 +73,8 @@ def limit_sudakov_factors(factors, accounting_key=None):
     factors = list(factors)
     if abs(factors[0]) > 200:
         _dbg(f"Neutralizing all Sudakov factors: |central|={abs(factors[0]):g} exceeds 200")
-        if accounting_key is not None and _FKS_COUNT_ACTIVE:
-            FKS_QUALITY_COUNTS[accounting_key] += 1
+        if accounting_key is not None:
+            _count_fks_event(accounting_key)
         return [1.0] * len(factors)
     return factors
 
@@ -114,15 +114,19 @@ FKS_QUALITY_COUNTS = Counter()  # coarse quality events (aborts, damping, ...)
 #                   history is then unavailable).
 FKS_FALLBACK_POLICY = "accept"
 
-# Counting gate: counters are incremented only during the FIRST clustering
-# pass of each event of the main event loop (CURRENT_EVENT_ID > 0). The
-# catalogue prescan (which clusters every event before the loop with
-# CURRENT_EVENT_ID == 0), the xi-scan re-clusterings and the density->scalar
-# fallback re-clustering of the same event are NOT counted, so the summary is
-# per event rather than per clustering call. Counters are per worker process
-# in multicore runs.
+# Mapping counters use the first clustering pass of each main-loop event.
+# Event outcome counters cover the full driver chain and every xi evaluation.
+# Both exclude the catalogue prescan (CURRENT_EVENT_ID == 0) and are per worker.
 _FKS_COUNT_ACTIVE = False
 _FKS_COUNTED_UPTO = 0
+_FKS_QUALITY_EVENT_IDS = {}
+
+
+def _count_fks_event(name):
+    """Count an outcome once for the current main-loop event."""
+    if CURRENT_EVENT_ID > 0 and _FKS_QUALITY_EVENT_IDS.get(name) != CURRENT_EVENT_ID:
+        FKS_QUALITY_COUNTS[name] += 1
+        _FKS_QUALITY_EVENT_IDS[name] = CURRENT_EVENT_ID
 
 
 def fks_reset_accounting():
@@ -130,6 +134,7 @@ def fks_reset_accounting():
     global _FKS_COUNT_ACTIVE, _FKS_COUNTED_UPTO
     FKS_METHOD_COUNTS.clear()
     FKS_QUALITY_COUNTS.clear()
+    _FKS_QUALITY_EVENT_IDS.clear()
     _FKS_COUNT_ACTIVE = False
     _FKS_COUNTED_UPTO = 0
 
@@ -137,7 +142,8 @@ def fks_reset_accounting():
 def fks_accounting_summary():
     """Multi-line summary of FKS-mapping outcomes accumulated in this launch.
 
-    Counts are per event (first clustering pass only) and per worker process.
+    Mapping counts use the first clustering pass; outcomes count each event
+    once across driver fallbacks and xi evaluations. All counts are per worker.
     """
     total = sum(FKS_METHOD_COUNTS.values())
     n_fallback = sum(
@@ -3075,8 +3081,8 @@ class FxFxEWSudakovMixin:
         """
         _dbg(f"[CLUSTER] _cluster_fxfx_event ENTER: npart={len(event)}, record_tag={record_tag}, return_groups={return_groups}")
 
-        # Counting gate: only the first clustering pass of each event of the
-        # main event loop feeds the accounting counters (see module header).
+        # Mapping counters include only the first clustering pass of each
+        # main-loop event; event outcomes are counted by _count_fks_event.
         global _FKS_COUNT_ACTIVE, _FKS_COUNTED_UPTO
         if CURRENT_EVENT_ID > 0 and CURRENT_EVENT_ID > _FKS_COUNTED_UPTO:
             _FKS_COUNT_ACTIVE = True
@@ -4233,15 +4239,13 @@ class FxFxEWSudakovMixin:
         cluster_result = self._cluster_fxfx_event(event, record_tag=True)
         _dbg(f"[SCALAR]   cluster_result = {'EMPTY/None' if not cluster_result else f'OK ({len(cluster_result[0])} particles in event_to_sud)'}")
         if not cluster_result:
-            _dbg("[FALLBACK] NO CLUSTERING INFO -> falling back to legacy ickkw=0 _compute_ewsudakov_reweight (NB: legacy lacks 2→1 guard and 3-variant schema)")
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
+            _dbg("[FALLBACK] No clustering information: evaluating the unclustered event")
+            _count_fks_event("events_legacy_fallback")
             if FKS_FALLBACK_POLICY == "unit_weight":
                 # Clustering itself failed, so the method history is not
                 # available; the conservative policy demotes these events too.
                 _dbg("[POLICY] clustering failed and policy=unit_weight -> 3×1.0")
-                if _FKS_COUNT_ACTIVE:
-                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
             return self._compute_ewsudakov_reweight(event, sud_mod)
 
@@ -4252,12 +4256,10 @@ class FxFxEWSudakovMixin:
         # non-success method is passed through with unit weights.
         _fks_hist = getattr(event_to_sud, "fks_methods", [])
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_with_fsr_fallback"] += 1
+            _count_fks_event("events_with_fsr_fallback")
             if FKS_FALLBACK_POLICY == "unit_weight":
                 _dbg(f"[POLICY] FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
-                if _FKS_COUNT_ACTIVE:
-                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology after clustering (e.g. a single hard parton
@@ -4407,10 +4409,7 @@ class FxFxEWSudakovMixin:
         _dbg("Step 1: Clustering event (FxFx)...")
         cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
         if not cluster_result:
-            # No clustering info — fall back to the FxFx scalar path (which has the
-            # ξ-scan + 5-NLL-variants schema). The legacy LO entry
-            # _compute_ewsudakov_reweight is only for ickkw==0 and is no longer
-            # reachable from the ickkw==3 chain after this redirect.
+            # Evaluate the scalar path when clustering information is unavailable.
             _dbg("  -> NO CLUSTERING INFO, falling back to FxFx scalar path")
             density_logger.log_event("fallback_no_cluster", [], 0, 1.0)
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
@@ -4421,12 +4420,10 @@ class FxFxEWSudakovMixin:
         # analogue): unit weights for fallback-tainted events when requested.
         _fks_hist = getattr(clustered_event, "fks_methods", [])
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_with_fsr_fallback_density"] += 1
+            _count_fks_event("events_with_fsr_fallback_density")
             if FKS_FALLBACK_POLICY == "unit_weight":
                 _dbg(f"  -> FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
-                if _FKS_COUNT_ACTIVE:
-                    FKS_QUALITY_COUNTS["events_unit_weight_by_policy"] += 1
+                _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
@@ -4503,8 +4500,7 @@ class FxFxEWSudakovMixin:
         # Calling it outside those bounds is a silent assumed-size Fortran
         # overrun, so degrade safely to the polarisation-summed scalar lane.
         if not density_dimensions_supported(total_dim, len(resonances)):
-            if _FKS_COUNT_ACTIVE:
-                FKS_QUALITY_COUNTS["events_density_dim_overflow"] += 1
+            _count_fks_event("events_density_dim_overflow")
             global _DIM_OVERFLOW_WARNED
             if not _DIM_OVERFLOW_WARNED:
                 logger.warning(

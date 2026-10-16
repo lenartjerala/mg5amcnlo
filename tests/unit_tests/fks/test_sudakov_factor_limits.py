@@ -118,7 +118,7 @@ class TestSudakovFactorLimits(unittest.TestCase):
                 self.assert_factors(driver, result, expected + extra, event)
 
     def test_accounting_counts_central_neutralization(self):
-        with mock.patch.object(fx, '_FKS_COUNT_ACTIVE', True):
+        with mock.patch.object(fx, 'CURRENT_EVENT_ID', 1):
             fx.limit_sudakov_factors([201., 2., 3.], 'events_runaway_damped_density')
             fx.limit_sudakov_factors([-201., 2., 3.], 'events_runaway_damped_scalar')
             fx.limit_sudakov_factors([1., 300., 400.], 'events_runaway_damped_density')
