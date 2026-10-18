@@ -33,13 +33,6 @@ c Scales
       common /c_orderstags_glob/n_orderstags, orderstags_glob
       double precision mcmass(-16:21)
 c
-      ! Initialise clustering strings only once header writing starts,
-      ! after all declarations (Fortran requires executable after decls)
-      do cid = 0, MAXFKSLOC
-         clusterstrings(cid) = ''
-      enddo
-      ptclusstring = ''
-      
       write(ifile,'(a)')
      #     '<LesHouchesEvents version="3.0">'
       write(ifile,'(a)')
@@ -186,11 +179,6 @@ c     in write_lhe_event. It is set to -99 through a block data
 c     statement.
       event_id=0
 c
-      do cid = 0, MAXFKSLOC
-         clusterstrings(cid) = ''
-      enddo
-      ptclusstring = ''
-
       write(ifile,'(a)') '<LesHouchesEvents version="3.0">'
       write(ifile,'(a)') '  <header>'
       write(ifile,'(a)') '  <MG5ProcCard>'
