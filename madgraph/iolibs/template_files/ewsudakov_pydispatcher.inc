@@ -18,6 +18,21 @@ _SUBPROCESSES_DIR = os.path.join(_RW_ME_DIR, 'SubProcesses')
 if _SUBPROCESSES_DIR not in sys.path:
     sys.path.insert(0, _SUBPROCESSES_DIR)
 
+
+def import_lib(name):
+    """Load the process-specific f2py module from this output directory."""
+    old_dir = os.getcwd()
+    old_path = sys.path[:]
+    try:
+        process_dir = os.path.join(_SUBPROCESSES_DIR, name)
+        sys.path.insert(0, process_dir)
+        os.chdir(process_dir)
+        return importlib.import_module('ewsudpy_%%s' %% name)
+    finally:
+        os.chdir(old_dir)
+        sys.path[:] = old_path
+
+
 # Filled in at export time; PDG keys are ((initial), (sorted final))
 
 pdir_list = [%(pdir_list)s]
