@@ -100,9 +100,9 @@ class ReferenceTransport:
         self.leaves = {i: {j: matrix @ p for j, p in leaves.items()}
                        for i, leaves in self.leaves.items()}
 
-    def fsr(self, pair, parent, mass, in_cm=True):
+    def fsr(self, pair, parent, mass):
         total = sum(self.beams)
-        velocity = np.array([0., 0., total[3] / total[0]]) if in_cm else np.zeros(3)
+        velocity = np.array([0., 0., total[3] / total[0]])
         self.transform(boost(velocity))
         total = sum(self.beams)
         recoil = sum((p for i, p in self.particles.items() if i not in pair), np.zeros(4))
@@ -255,7 +255,7 @@ class TestDecayTransport(unittest.TestCase):
         expected = ReferenceTransport(event)
         expected.fsr((6, 7), 3, fx.MW_POLE)
         expected.isr(4)
-        expected.fsr((8, 9), 8, fx.MW_POLE, in_cm=False)
+        expected.fsr((8, 9), 8, fx.MW_POLE)
         expected.isr(5)
         self.check_sequence(event, expected, [(2, 3), (3, 8)],
                             ["fks_fsr_massive_onshell", "fks_isr_cm_boost",
@@ -291,8 +291,8 @@ class TestDecayTransport(unittest.TestCase):
                            'step_2="(4,5);mom=24" step_3="(6,7);mom=-24"></clustering>')
         expected = ReferenceTransport(event)
         expected.isr(3)
-        expected.fsr((4, 5), 4, fx.MW_POLE, in_cm=False)
-        expected.fsr((6, 7), 6, fx.MW_POLE, in_cm=False)
+        expected.fsr((4, 5), 4, fx.MW_POLE)
+        expected.fsr((6, 7), 6, fx.MW_POLE)
         self.check_sequence(event, expected, [(2, 4), (3, 6)],
                             ["fks_isr_cm_boost", "fks_fsr_massive_onshell", "fks_fsr_massive_onshell"])
 

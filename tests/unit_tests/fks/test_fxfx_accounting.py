@@ -20,7 +20,7 @@ class TestFxFxAccounting(unittest.TestCase):
         self.event = self.fixture.event
         self.driver = limits.FactorDriver()
 
-    def test_density_no_cluster_counts_scalar_outcomes_for_each_policy(self):
+    def test_density_no_cluster_gives_unit_weights_for_each_policy(self):
         self.event = self.driver._cluster_fxfx_event(self.event)[0]
         self.fixture.event = self.event
         self.event.tag = ''
@@ -31,13 +31,10 @@ class TestFxFxAccounting(unittest.TestCase):
                 for event_id, expected in ((0, 0), (1, 1), (1, 1), (2, 2), (2, 2), (0, 2)):
                     fx.CURRENT_EVENT_ID = event_id
                     result = self.driver._compute_density_ewsudakov_reweight(self.event, None)
-                    self.assertEqual(fx.FKS_QUALITY_COUNTS['events_legacy_fallback'], expected)
-                    self.assertEqual(fx.FKS_QUALITY_COUNTS['events_unit_weight_by_policy'],
-                                     expected if policy == 'unit_weight' else 0)
-                    if policy == 'unit_weight':
-                        self.fixture.assert_factors(self.driver, result, [1., 1., 1.])
-                    else:
-                        self.assertEqual(result, {'orig': -2.})
+                    self.assertEqual(fx.FKS_QUALITY_COUNTS['events_clustering_failed'], expected)
+                    self.assertEqual(fx.FKS_QUALITY_COUNTS['events_unit_weight_by_policy'], 0)
+                    self.fixture.assert_factors(self.driver, result, [1., 1., 1.])
+                self.driver._compute_ewsudakov_reweight.assert_not_called()
 
     def test_density_dimension_limit_counts_scalar_neutralization(self):
         module = self.fixture.scalar_module(self.driver, [201., 41., 31.])
@@ -103,7 +100,7 @@ class TestFxFxAccounting(unittest.TestCase):
                 self.assertEqual(fx._FKS_QUALITY_EVENT_IDS, {})
                 fx.CURRENT_EVENT_ID = 1
                 self.driver._compute_density_ewsudakov_reweight(self.event, None)
-                self.assertEqual(fx.FKS_QUALITY_COUNTS['events_unit_weight_by_policy'], 1)
+                self.assertEqual(fx.FKS_QUALITY_COUNTS['events_clustering_failed'], 1)
 
 
 if __name__ == '__main__':

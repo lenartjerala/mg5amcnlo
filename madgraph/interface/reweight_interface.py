@@ -45,7 +45,6 @@ import madgraph.various.cluster as cluster
 import madgraph.fks.fks_common as fks_common
 import madgraph.core.diagram_generation as diagram_generation
 
-# FxFx EW Sudakov mixin for spin-correlated reweighting
 from madgraph.various import fxfx_ewsudakov
 from madgraph.various.fxfx_ewsudakov import FxFxEWSudakovMixin
 
@@ -121,12 +120,12 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         self.keep_ordering = False
         self.use_eventid = False
         self.inc_sudakov = False
-        # ξ-scan for EW Sudakov clustering threshold (s_ij > ξ·M_W²).
-        # None → legacy single-ξ behavior (defaults to mW2_cluster_scale=1.5).
-        # List of floats → produce one weight pair (central, s_to_rij-var) per ξ.
+        # 'sudakov_xi' card values (ickkw=3 only): clustering threshold xi*M_W^2
+        # on s_ij, one set of Sudakov variants per xi.
+        # None -> [mW2_cluster_scale] (1.5).
         self.sudakov_xi_scan = None
-        self._sudakov_xi_list = None      # finalized list used at launch time
-        self._current_xi_idx = 0          # which ξ-index is the per-event compute on
+        self._sudakov_xi_list = None      # xi values of the output weight layout
+        self._current_xi_idx = 0          # index of the xi being evaluated
         self.event_path = event_path
         self.path2prefix = {} # store the f2pyprefix associated to a library
         self.fxfx_clustered_final_states = set()
@@ -148,9 +147,10 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         #all the cross-section for convenience
         self.all_cross_section = {}
 
-        #If we are using the DensityInterface (must be set before do_import which can raise)
+        #If we are using the DensityInterface
         self.flag_density_matrix = False
 
+        # Last: if do_import raises, __del__ -> do_quit still uses the attributes above.
         if event_path:
             logger.info("Extracting the banner ...")
             self.do_import(event_path, allow_madspin=allow_madspin)
@@ -541,7 +541,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             self.options['rwgt_info'] = opts['rwgt_info']
         model_line = self.banner.get('proc_card', 'full_model_line')
 
-        # Load the model so combine_ij can operate correctly.
+        # combine_ij (event clustering) needs the model.
         model = self.banner.get('proc_card', 'model')
         self.load_model(model, True, False)
 
@@ -631,13 +631,12 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
 
 
         self.lhe_input.seek(0)
-        # Reset event counter and the per-launch FKS accounting (module-level
-        # counters would otherwise accumulate across param-scan iterations and
-        # repeated launch commands).
+        # FKS accounting is module-level (it would accumulate over param scans and
+        # repeated launches), so reset it here. CURRENT_EVENT_ID is 1-based in the
+        # event loop; 0 (catalogue prescan) is not counted.
         fxfx_ewsudakov.CURRENT_EVENT_ID = 0
         fxfx_ewsudakov.fks_reset_accounting()
         for event_nb,event in enumerate(self.lhe_input):
-            # Set current event ID for debug printouts (1-based to match user expectations)
             fxfx_ewsudakov.CURRENT_EVENT_ID = event_nb + 1
             #control logger
             if (event_nb % max(int(10**int(math.log10(float(event_nb)+1))),10)==0):
@@ -701,9 +700,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         running_time = misc.format_timer(time.time()-start)
         logger.info('All event done  (nb_event: %s) %s' % (event_nb+1, running_time))
         if self.inc_sudakov:
-            # Per-run FKS-mapping / clustering-quality accounting. No event is
-            # ever thrown away: fallbacks are counted, and their handling is
-            # controlled by fxfx_ewsudakov.FKS_FALLBACK_POLICY.
+            # FKS-mapping/clustering summary. Events are never dropped; fallback
+            # handling is set by fxfx_ewsudakov.FKS_FALLBACK_POLICY.
             for line in fxfx_ewsudakov.fks_accounting_summary().splitlines():
                 logger.info(line)
         
@@ -1229,18 +1227,15 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
 
             return {'orig': orig_wgt, '': w_new/w_orig*orig_wgt*jac}
         else:
-            # EW Sudakov path - check ickkw to route to correct handler
             ickkw = getattr(self, '_sudakov_ickkw', None)
             if ickkw is None:
                 try:
                     ickkw = int(self.banner.get('run_card', 'ickkw'))
                 except Exception:
-                    ickkw = 0  # default to scalar path if not found
+                    ickkw = 0
 
             if ickkw == 0:
-                # ickkw=0 path is independent of the FxFx clustering threshold:
-                # its merge decision uses an internal hardcoded cutoff. Single call,
-                # single weight set, no ξ-loop.
+                # Clustering cut fixed at M_W^2 (sud_cut): no xi loop.
                 self._current_xi_idx = 0
                 return self._compute_ewsudakov_reweight(event, sud_mod)
             elif ickkw == 3:
@@ -1258,7 +1253,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 raise Exception("EW Sudakov reweighting not supported for run_card ickkw=%s" % ickkw)
 
     def _compute_ewsudakov_reweight(self, event, sud_mod):
-        """Compute EW Sudakov reweight for a single event (LO path, non-FxFx)."""
+        """EW Sudakov weights for one event with the ickkw=0 clustering."""
         import numpy as np
 
         buff_event = copy.deepcopy(event)
@@ -1266,15 +1261,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         pi = 3.141592653589
         mW = 80.3
 
-        # 2→1 topology pass-through. Mirrors what _compute_ewsudakov_fxfx_reweight
-        # (fxfx_ewsudakov.py:3555-3557) and _compute_density_ewsudakov_reweight
-        # (fxfx_ewsudakov.py:3678-3682) already do. Without this guard, when the
-        # density path falls back here for un-clusterable 2→1 LHE events
-        # (qq̄ → Z with no real radiation in the FKS counter-event channels),
-        # the scalar kernel hits a clamp+leg-reorder regime where res[2] = −res[0]
-        # and writes 0 into weights[20XX]. Pass-through = LHE base × 1.0 keeps
-        # the variant slot honest (no Sudakov correction for events outside the
-        # Sudakov-logs validity region).
+        # 2->1 events (e.g. q qbar -> Z) get unit factors, as in the FxFx paths:
+        # no Sudakov logs at s = M^2, and the kernel returns res[2] = -res[0]
+        # (a zero central factor) there.
         n_init  = sum(1 for p in buff_event if p.status == -1)
         n_final = sum(1 for p in buff_event if p.status ==  1)
         if n_init == 2 and n_final == 1:
@@ -1387,10 +1376,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             for p in event_to_sud:
                 p.set_momentum(lhe_parser.FourMomentum(p).rotate_to_z(prot=lhe_parser.FourMomentum(initial)))
 
-        # After boost+rotate, the initial state is algebraically (E/2, 0, 0, +/-E/2)
-        # but carries ~10^-7 x E numerical residue from rotate_to_z. Enforce the
-        # invariant exactly before calling set_initial_mass_to_zero so its strict
-        # precondition cannot be violated by accumulated operator roundoff.
+        # After boost + rotation the incoming pair is (E/2, 0, 0, +-p) up to
+        # ~1e-7 E round-off from rotate_to_z; set it exactly, as
+        # set_initial_mass_to_zero requires.
         p0, p1 = event_to_sud[0], event_to_sud[1]
         E_in   = abs(p0.E) + abs(p1.E)
         pz_abs = (abs(p0.pz) + abs(p1.pz)) / 2.0
@@ -2259,7 +2247,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             #self.id_to_path_second = {}
             #data['id2path'] = self.id_to_path_second
 
-        # FxFx EW Sudakov mode setup
+        # FxFx EW Sudakov: add the clustered final states catalogued from the events.
         fxfx_clean = lambda expression: re.sub(r'\[[^\]]*\]', '', expression).strip()
         extra_processes = []
         fxfx_extra_set = set()
@@ -2280,7 +2268,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         data['fxfx_mode'] = fxfx_mode
         data['fxfx_extra_set'] = fxfx_extra_set
 
-        # Generate density matrix processes from event clustering
+        # Density-matrix production/decay processes, from the same catalogue.
         density_prod_processes = []
         density_decay_processes = []
         if fxfx_mode:
@@ -2364,7 +2352,6 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 has_nlo=False
         else:
             has_nlo = self.create_standalone_tree_directory(data, second)
-            # Create density directories for FxFx Sudakov (production and decay)
             if (not second) and self.inc_sudakov:
                 prod_procs = data.get('density_prod_processes', [])
                 decay_procs = data.get('density_decay_processes', [])
@@ -2498,19 +2485,16 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
     def compile_SubProcess_dir(self, Sdir, procname=None):
         """compile a full Subprocess directory.
 
-        procname: if given, passed to make as a command-line override
-        'PROCNAME=<procname>'. This forces a UNIQUE Fortran ME-library soname
-        (liball<procname>_<tag>me.so) and matching DT_NEEDED for this directory.
-        Required for the density modules (rw_me_density_prod / rw_me_density_decay):
-        the makefile's 'PROCNAME= $(notdir $(dir $(abspath $(HERE))))' evaluates to
-        EMPTY (trailing-slash/notdir), so without this every density dir links an
-        identically-named 'liball_<tag>me.so' with an identical DT_SONAME. glibc
-        then satisfies the two extensions' bare-soname DT_NEEDED by matching the
-        FIRST-loaded copy (prod), so the decay extension binds to prod's symbols
-        and get_pdg_order() returns prod's process table -> decay density matrix C
-        fails -> EW-Sudakov reweight silently falls back to scalar. A make CLI
-        assignment overrides the makefile's unconditional '=' (an env var would not,
-        unlike MENUM which the makefile sets only 'ifeq undefined')."""
+        procname: if given, passed to make as 'PROCNAME=<procname>' so the ME
+        library is liball<procname>_<MENUM>me.so.  The makefile's PROCNAME
+        evaluates to empty, so every directory otherwise builds liball_<MENUM>me.so
+        with the same soname, and when both density extensions are loaded
+        (rw_me_density_prod, rw_me_density_decay) the dynamic loader binds the
+        second to the first one's library: decay get_pdg_order() then returns the
+        production process table, no decay density matrix can be built, and the
+        density path falls back to the scalar factor.  A make command-line
+        assignment overrides the makefile's unconditional '=' (an environment
+        variable, as used for MENUM, would not)."""
 
         if self.mother:
             nb_core = self.mother.options['nb_core'] if self.mother.options['run_mode'] !=0 else 1
@@ -2541,12 +2525,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
             if not os.path.isdir(sub_dir):
                 continue
             logger.info('Compiling density modules in %s', sub_dir)
-            # Pass a UNIQUE PROCNAME so prod/decay build distinct ME-lib sonames
-            # (liball<dir_name>_<tag>me.so). Without this both link an identical
-            # 'liball_<tag>me.so'; glibc's soname dedup then makes the second-loaded
-            # density module bind to the first's Fortran symbols (decay -> prod),
-            # so decay get_pdg_order() is wrong and the decay density matrix C
-            # lookup fails. See compile_SubProcess_dir docstring.
+            # Distinct ME-library soname per directory: see compile_SubProcess_dir.
             self.compile_SubProcess_dir(sub_dir, procname=dir_name)
 
     def load_density_modules(self):
@@ -2589,9 +2568,8 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                     while '.' in tmp_mod_name:
                         tmp_mod_name = tmp_mod_name.rsplit('.', 1)[0]
                         del sys.modules[tmp_mod_name]
-                # CRITICAL: Also clear the native .so modules which have the same name
-                # across different directories (all_matrix2py, all_matrix3py)
-                # Without this, Python caches the first loaded .so and reuses it
+                # The native extension all_matrix<tag>py has the same name in every
+                # directory: drop the cached one so this directory's .so is imported.
                 native_mod_name = 'all_matrix%spy' % tag
                 if native_mod_name in sys.modules:
                     del sys.modules[native_mod_name]
@@ -2618,12 +2596,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         hel_dict = {}
         for prefix in prefix_set:
             if hasattr(mymod, '%sprocess_nhel' % prefix):
-                # Transfer nhel from the Fortran common block into the f2py wrapper,
-                # then read the PREFIXED member (e.g. m0_process_nhel.m0_nhel). The bare
-                # `.nhel` does NOT exist on the f2py common-block object -> AttributeError
-                # ('fortran' object has no attribute 'nhel'). Matches the canonical
-                # scalar/virtual loader below; verified against the density ME's f2py
-                # symbols (m0_get_nhel_entry, m0_process_nhel.m0_nhel).
+                # <prefix>get_nhel_entry() copies the ME helicity table into the
+                # wrapper's common block, exposed by f2py as
+                # <prefix>process_nhel.<prefix>nhel.
                 getattr(mymod, '%sget_nhel_entry' % prefix)()
                 nhel = getattr(getattr(mymod, '%sprocess_nhel' % prefix), '%snhel' % prefix)
                 hel_dict[prefix] = {}

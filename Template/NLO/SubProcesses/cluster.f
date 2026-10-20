@@ -44,7 +44,7 @@ C given by the to_mconfigs common block.
       logical firsttime(0:fks_configs),skip_first,skip_first_write
        CHARACTER*(2000) clusterstring
        COMMON /c_clusterstring/ clusterstring
-c New array to store clustering strings for all iproc within one event
+c One <clustering> string per iproc of the current event
        INTEGER MAXFKSLOC
        PARAMETER (MAXFKSLOC=512)
        CHARACTER*(2000) clusterstrings(0:MAXFKSLOC)
@@ -125,8 +125,7 @@ c form factor and renormalisation and factorisation scales.
       else
          skip_first=.true. ! for real-emission: skip the first clustering
       endif
-      ! For writeout, do not skip the first clustering so that the number of
-      ! printed steps reflects the full clustering history
+      ! the written clustering history includes the first clustering
       skip_first_write=.false.
       call set_array_indices(iproc,cluster_conf,il_list,il_pdg)
       need_matching(1:nexternal)=-99
@@ -134,11 +133,11 @@ c form factor and renormalisation and factorisation scales.
      $     ,cluster_pdg(il_pdg),cluster_scales,iord,sudakov
      $     ,expanded_sudakov,nqcdrenscale,qcd_ren_scale,qcd_fac_scale
      $     ,need_matching(1))
-      !--------------------------------------------------------------
-      ! Build clustering-history string compliant with LHE v3.0:
-      !  <clustering step_1="i,j,scale" … final_scale="scale"/>
-      !  where i and j are external‐particle indices merged at that step.
-      !--------------------------------------------------------------
+      ! Clustering history for the LHE event record:
+      !  <clustering type="born|real" iproc="n" step_k="legs;scale;mom=pdg"
+      !   ... final_scale="scale"></clustering>
+      ! legs: comma-separated external legs in the bitmask cluster_ij(k),
+      ! scale: cluster_scales(k), pdg: PDG code of the clustered mother.
       clusterstring=''
       temp=''
       if (iproc.eq.0) then
@@ -150,19 +149,17 @@ c form factor and renormalisation and factorisation scales.
       temp0='<clustering type="'//trim(adjustl(role))//'" iproc="'//
      $       trim(adjustl(cidstr))//'"'
 
-      isave = 0   ! counter for steps that are actually written (final-state only)
+      isave = 0
       do iclus = 1, nbr
          if (skip_first_write .and. iclus.eq.1) cycle
 
-         ! Increment visible step counter and write it
          isave = isave + 1
          write(integf,'(I0)') isave
 
-         ! Format the scale
       write(float,'(ES20.10)') cluster_scales(iclus)
          float = trim(adjustl(float))
 
-         ! Decode the bitmask in cluster_ij to external indices
+         ! external legs in the bitmask cluster_ij(iclus)
          pairstr=''
          cid=cluster_ij(iclus)
          bitpos=1
@@ -175,9 +172,8 @@ c form factor and renormalisation and factorisation scales.
             cidlocal = ishft(cidlocal,-1)
             bitpos = bitpos + 1
          enddo
-         if (len_trim(pairstr).ge.1) pairstr=pairstr(2:)  ! drop first comma
+         if (len_trim(pairstr).ge.1) pairstr=pairstr(2:)
 
-         ! Determine mother PDG for this clustering step using mapping iord
          mother_pdg = get_step_mother_pdg(iclus, nbr, iord, cluster_pdg(il_pdg))
          write(momstr,'(I0)') mother_pdg
          temp = trim(temp)//' step_'//trim(adjustl(integf))//'="'//trim(pairstr)//';'//

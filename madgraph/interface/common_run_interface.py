@@ -2465,12 +2465,11 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
                                         info="Will use re-weighting from pluging %(plug)s")
                 
 
-        # Check if we should allow MadSpin for FxFx EW Sudakov reweighting
-        # FxFx Sudakov uses forced clustering to reconstruct hard process from decayed events
+        # FxFx (ickkw=3) EW Sudakov reweighting clusters decayed events back to the
+        # hard process, so MadSpin-decayed input is allowed there.
         allow_madspin_for_fxfx_sudakov = False
         reweight_card_path = pjoin(self.me_dir, 'Cards', 'reweight_card.dat')
         if hasattr(self, 'run_card') and 'ickkw' in self.run_card and int(self.run_card['ickkw']) == 3:
-            # FxFx mode - check if EW Sudakov is enabled in reweight card
             if os.path.exists(reweight_card_path):
                 with open(reweight_card_path, 'r') as f:
                     reweight_content = f.read().lower()

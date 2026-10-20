@@ -2265,8 +2265,7 @@ This typically happens when using the 'low_mem_multicore_nlo_generation' NLO gen
         self.write_sudakov_wrapper(writers.FortranWriter(filename),
                                    matrix_element,has_lo,fortran_model)
 
-        # Generate density matrix wrapper for spin-correlated EW Sudakov
-        # Uses Valentin's GET_DENSITY infrastructure (no separate born_jamp.f needed)
+        # per-helicity Sudakov wrapper for the spin-correlated reweighting
         if matrix_element.ewsudakov:
             filename = "density_matrix_wrapper.f"
             self.write_density_matrix_wrapper(writers.FortranWriter(filename),
@@ -3050,22 +3049,19 @@ Parameters              %(params)s\n\
 
 
     #===============================================================================
-    # write_density_matrix_wrapper - density matrix computation wrapper
+    # write_density_matrix_wrapper
     #===============================================================================
     def write_density_matrix_wrapper(self, writer, matrix_element, fortran_model):
-        """Write the density matrix wrapper used for spin-correlated Sudakov.
+        """Write density_matrix_wrapper.f for the spin-correlated EW Sudakov.
 
-        Architecture (delta-only mode):
-          - Fortran: Sudakov kernels via sudakov_wrapper (per-helicity)
-          - Python:  Density matrices via DensityHelper (rw_me_density_prod)
-          - Python:  Normalization of delta using B diagonal from DensityHelper
-
-        This wrapper ONLY computes per-helicity Sudakov corrections.
-        The B matrix is computed by Python's DensityHelper using Valentin's
-        GET_DENSITY from the standalone rw_me_density_prod modules.
+        For each resonance-helicity combination h the wrapper returns the
+        Born-weighted Sudakov correction (density_delta) and the Born summed over
+        spectator helicities (born_diag); Python takes their ratio as delta_h.
+        The density matrix B[h,h'] is built in Python (DensityHelper, from
+        GET_DENSITY of the rw_me_density_prod modules).
         """
-        # Template no longer uses substitution variables (Phase 1 and 3 removed)
-        # but we keep the dict for backward compatibility
+        # No substitution variables, but the template is still %-formatted:
+        # a literal '%' in it must be written '%%'.
         replace_dict = {}
 
         file = open(os.path.join(_file_path,
@@ -3252,12 +3248,9 @@ Parameters              %(params)s\n\
 
         # Extract color data lines
         color_data_lines = self.get_color_data_lines(matrix_element)
-        # get_color_data_lines emits "%(proc_prefix)s" placeholders meant for a
-        # second substitution pass; every other Sudakov-ME writer applies it
-        # (write_sudakov_me:~3534 and ~2059/2692/2793). The goldstone writer was
-        # missing it, so raw %(proc_prefix)s leaked into ewsudakov_goldstone_me_*.f
-        # -> "Syntax error in DATA statement" for the first process that produces
-        # a Goldstone ME (e.g. charged WW). Match the siblings.
+        # get_color_data_lines emits "%(proc_prefix)s" placeholders for a second
+        # pass (as in the other Sudakov-ME writers); left unsubstituted they break
+        # the Fortran DATA statements of ewsudakov_goldstone_me_*.f.
         replace_dict['color_data_lines'] = "\n".join(color_data_lines) % {'proc_prefix': ''}
 
         # Extract helas calls of the base  matrix element

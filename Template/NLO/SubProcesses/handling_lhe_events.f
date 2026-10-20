@@ -14,7 +14,6 @@ c Utility routines for LHEF. Originally taken from collect_events.f
       implicit none 
       include 'run.inc'
       integer idwgt,kk,ii,jj,nn,n,i,cid
-      ! Ensure clustering strings common block is declared
       INTEGER MAXFKSLOC
       PARAMETER (MAXFKSLOC=512)
       CHARACTER(LEN=2000) clusterstrings(0:MAXFKSLOC)
@@ -748,10 +747,8 @@ c
       integer n_orderstags
       integer orderstags_glob(maxorders)
       common /c_orderstags_glob/n_orderstags, orderstags_glob
-      ! Chosen FKS configuration for this event (set upstream when selecting contribution)
       INTEGER NFKSPROCESS
       COMMON/C_NFKSPROCESS/NFKSPROCESS
-      ! Variables to augment <clustering ...> lines with optimal nFKS
       integer ipos,qend,iproc_val,nFKS_map,nFKS_attr,ipos_nfks,ipos2,ipos_evt,qend_evt
       character*2000 tmpstr
       character*16 nFKSstr
@@ -897,15 +894,13 @@ c
          endif
       endif
       printed_real = .false.
-c----------------------------------------------------------------
-c FxFx-specific metadata:
-c  - 'ptclusstring' holds the <scales ...> line with pt_clust_*.
-c  - 'clusterstrings' holds one <clustering ...> line per iproc.
-c To avoid printing uninitialized garbage, only write strings that
-c    clearly match the expected tags.
-c Consolidate clustering info: S-events use born (iproc=0) only,
-c H-events use real (iproc>0) only, and add event_type attribute.
-c----------------------------------------------------------------
+c FxFx: ptclusstring holds the <scales ...> line with pt_clust_*,
+c clusterstrings(iproc) one <clustering ...> line per iproc (0 = Born).
+c Only strings carrying the expected tags are written (the buffers may
+c be unset). S-events write the Born clustering (iproc=0), H-events at
+c most one real clustering: the first whose iproc equals its nFKS
+c attribute, or NFKSPROCESS if it has none (any, if NFKSPROCESS <= 0).
+c event_type and nFKS attributes are added when absent.
       if (ickkw.eq.3) then
          if (index(ptclusstring,'<scales').ne.0 .or.
      &       index(ptclusstring,'pt_clust_').ne.0) then
@@ -915,7 +910,6 @@ c----------------------------------------------------------------
              if (len_trim(clusterstrings(cid)).gt.0) then
                 if (index(clusterstrings(cid),'<clustering').ne.0) then
                    tmpstr = trim(adjustl(clusterstrings(cid)))
-                   ! Parse iproc value
                    iproc_val = 0
                    ipos = index(tmpstr,'iproc="')
                    if (ipos.gt.0) then
@@ -925,11 +919,7 @@ c----------------------------------------------------------------
 998                      continue
                       endif
                    endif
-                  ! Determine if this clustering should be written based on event type
-                  ! S-events (iSorH_lhe=1): only write born clustering (iproc=0)
-                  ! H-events (iSorH_lhe=2): only write real clustering (iproc>0)
                   do_print = .false.
-                  ! Parse optional nFKS attribute if already present
                   nFKS_attr = -1
                   ipos_nfks = index(tmpstr,'nFKS="')
                   if (ipos_nfks.gt.0) then
@@ -941,10 +931,8 @@ c----------------------------------------------------------------
                      endif
                   endif
                   if (iSorH_lhe.eq.1 .and. iproc_val.eq.0) then
-                     ! S-event: write born clustering
                      do_print = .true.
                   elseif (iSorH_lhe.eq.2 .and. iproc_val.ne.0) then
-                     ! H-event: write real clustering (check nFKS match)
                      match_real = .false.
                      nFKS_map = NFKSPROCESS
                      if (nFKS_attr.gt.0) then
@@ -957,14 +945,12 @@ c----------------------------------------------------------------
                      if (match_real .and. .not.printed_real) do_print = .true.
                   endif
                   if (.not.do_print) cycle
-                  ! Add event_type attribute: "S" for S-events, "H" for H-events
                   if (index(tmpstr,'event_type="').eq.0) then
                      if (iSorH_lhe.eq.1) then
                         event_type_str = 'event_type="S"'
                      else
                         event_type_str = 'event_type="H"'
                      endif
-                     ! Insert event_type after iproc attribute
                      if (index(tmpstr,'iproc="').gt.0) then
                         ipos = index(tmpstr,'iproc="')
                         qend = index(tmpstr(ipos+7:), '"')
@@ -975,7 +961,6 @@ c----------------------------------------------------------------
                         endif
                      endif
                   endif
-                  ! Add nFKS attribute if needed
                   if (nFKS_attr.le.0) then
                      nFKS_map = NFKSPROCESS
                      if (nFKS_map.gt.0) then
@@ -985,9 +970,8 @@ c----------------------------------------------------------------
                               ipos = index(tmpstr,'iproc="')
                               qend = index(tmpstr(ipos+7:), '"')
                               if (qend.gt.0) then
-                                 ! Find position after iproc attribute (may have event_type)
+                                 ! insert after iproc="..." and event_type="..."
                                  ipos2 = ipos+7+qend
-                                 ! Check if event_type is already there
                                  if (index(tmpstr(ipos2:),'event_type="').gt.0) then
                                     ipos_evt = index(tmpstr(ipos2:),'event_type="')
                                     qend_evt = index(tmpstr(ipos2+ipos_evt+11:), '"')
@@ -1226,13 +1210,11 @@ c
              read(ifile,'(a)') ptclusstring
              ! Consume one or more <clustering ...> lines
              clusterstring=' '
-             ! Clear any previous clustering strings for this event
              do i=0,FKS_CONFIGS
                 clusterstrings(i) = ''
              enddo
              read(ifile,'(a)') string
              do while (index(string,'<clustering').ne.0)
-                ! Accumulate all clustering lines in a single buffer
                 if (len_trim(clusterstring).eq.0) then
                    clusterstring = string
                 else
@@ -1242,8 +1224,7 @@ c
                       clusterstring = string
                    endif
                 endif
-                ! Store each clustering line to its slot based on iproc attribute
-                ! Default to slot 0 if not found
+                ! slot = iproc attribute (0 if absent or out of range)
                 ii = 0
                 if (index(string,'iproc="').ne.0) then
                    jj = index(string,'iproc="')
@@ -1260,7 +1241,7 @@ c
                 endif
                 read(ifile,'(a)') string
              enddo
-             ! 'string' now holds the first non-<clustering> line; rewind one
+             ! re-read the first non-<clustering> line
              backspace(ifile)
           else
              clusterstring=' '
@@ -1306,8 +1287,8 @@ c Read the <scales> block
          endif
       endif
       read(ifile,'(a)')string
-      ! If a <scales> block is present even when mcatnlo_delta is false,
-      ! consume it here to avoid tripping the end-of-event check.
+      ! a <scales> block not read above is read here (SCALUP_a);
+      ! otherwise the </event> check below would fail
       if(index(string,'<scales').ne.0) then
          do i=1,NUP
             do j=1,NUP
@@ -1506,13 +1487,11 @@ c
              read(ifile,'(a)') ptclusstring
              ! Consume one or more <clustering ...> lines
              clusterstring=' '
-             ! Clear any previous clustering strings for this event
              do i=0,fks_configs
                 clusterstrings(i) = ''
              enddo
              read(ifile,'(a)') string
              do while (index(string,'<clustering').ne.0)
-                ! Accumulate all clustering lines in a single buffer
                 if (len_trim(clusterstring).eq.0) then
                    clusterstring = string
                 else
@@ -1522,8 +1501,7 @@ c
                       clusterstring = string
                    endif
                 endif
-                ! Store each clustering line to its slot based on iproc attribute
-                ! Default to slot 0 if not found
+                ! slot = iproc attribute (0 if absent or out of range)
                 ii = 0
                 if (index(string,'iproc="').ne.0) then
                    jj = index(string,'iproc="')
@@ -1578,7 +1556,8 @@ c Read the <scales> block
          endif
       endif
       read(ifile,'(a)')string
-      ! If a <scales> block appears here, consume it to avoid end-of-event error
+      ! a <scales> block not read above is read here (SCALUP_a);
+      ! otherwise the </event> check below would fail
       if(index(string,'<scales').ne.0) then
          do i=1,NUP
             do j=1,NUP
