@@ -2570,8 +2570,6 @@ c Stuff to be written (depending on AddInfoLHE) onto the LHE file
       common/cemscav_tmp/emscav_tmp
       double precision qMC
       common /cqMC/    qMC
-      INTEGER selected_iproc_lhe
-      COMMON /c_selected_iproc/ selected_iproc_lhe
       INTEGER              NFKSPROCESS
       COMMON/C_NFKSPROCESS/NFKSPROCESS
       double precision ran2
@@ -2729,11 +2727,6 @@ c min() avoids troubles if ran2()=1
      $           ipartners(ipartner_lhe(nFKSprocess))
          endif
          scale1_lhe(nFKSprocess)=qMC
-         if (iSorH_lhe.eq.1) then
-            selected_iproc_lhe = 0
-         else
-            selected_iproc_lhe = nFKSprocess
-         endif
       endif
       if(dampMCsubt)then
          if(emsca.lt.scalemin)then

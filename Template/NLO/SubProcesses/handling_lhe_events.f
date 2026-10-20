@@ -1057,7 +1057,7 @@ c
      # PUP(5,*),VTIMUP(*),SPINUP(*)
       integer ifile,i,kk,jj,oo
       character*1000 buff
-      character*500 string
+      character*2000 string
       character*12 dummy12
       character*2 dummy2
       character*9 ch1
@@ -1344,7 +1344,7 @@ c Same as read_lhef_event, except for the end-of-file catch
      # PUP(5,*),VTIMUP(*),SPINUP(*)
       integer ifile,i,kk,jj,oo
       character*1000 buff
-      character*500 string
+      character*2000 string
       character*12 dummy12
       character*2 dummy2
       character*9 ch1

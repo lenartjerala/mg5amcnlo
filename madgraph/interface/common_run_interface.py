@@ -104,6 +104,29 @@ def render_HwU_plot(path, stdout=None, stderr=None):
                                                stderr=stderr)
 
 
+def fxfx_sudakov_reweight_options(run_card, reweight_card_path):
+    """Extra keyword arguments of the reweight interface for its input events.
+
+    FxFx (ickkw=3) EW Sudakov reweighting clusters decayed events back to the
+    hard process, so MadSpin-decayed input is allowed when the reweight card
+    runs 'change include_sudakov True' (the only value that do_change
+    accepts). Comments and ';' are treated as in Cmd.precmd.
+    """
+    try:
+        if int(run_card['ickkw']) != 3:
+            return {}
+    except (KeyError, TypeError, ValueError):
+        return {}
+    if not os.path.exists(reweight_card_path):
+        return {}
+    with open(reweight_card_path) as fsock:
+        for line in fsock:
+            for command in line.split('#')[0].split(';'):
+                if command.split()[:3] == ['change', 'include_sudakov', 'True']:
+                    return {'allow_madspin': True}
+    return {}
+
+
 #===============================================================================
 # HelpToCmd
 #===============================================================================
@@ -2465,18 +2488,10 @@ class CommonRunCmd(HelpToCmd, CheckValidForCmd, cmd.Cmd):
                                         info="Will use re-weighting from pluging %(plug)s")
                 
 
-        # FxFx (ickkw=3) EW Sudakov reweighting clusters decayed events back to the
-        # hard process, so MadSpin-decayed input is allowed there.
-        allow_madspin_for_fxfx_sudakov = False
-        reweight_card_path = pjoin(self.me_dir, 'Cards', 'reweight_card.dat')
-        if hasattr(self, 'run_card') and 'ickkw' in self.run_card and int(self.run_card['ickkw']) == 3:
-            if os.path.exists(reweight_card_path):
-                with open(reweight_card_path, 'r') as f:
-                    reweight_content = f.read().lower()
-                    if 'include_sudakov' in reweight_content and 'true' in reweight_content:
-                        allow_madspin_for_fxfx_sudakov = True
-
-        reweight_cmd = rwgt_interface(args[0], mother=self, allow_madspin=allow_madspin_for_fxfx_sudakov)
+        rwgt_options = fxfx_sudakov_reweight_options(
+            getattr(self, 'run_card', None),
+            pjoin(self.me_dir, 'Cards', 'reweight_card.dat'))
+        reweight_cmd = rwgt_interface(args[0], mother=self, **rwgt_options)
         #reweight_cmd.use_rawinput = False
         #reweight_cmd.mother = self
         wgt_names = reweight_cmd.get_weight_names()

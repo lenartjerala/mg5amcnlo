@@ -65,6 +65,21 @@ nb_f2py_module = 0 # each time the process/model is changed this number is modif
 #lhapdf = None
 
 
+def first_add_process_to_generate(commands):
+    """Turn the first 'add process' of the command sequence into 'generate'.
+
+    A command may start with definitions ('define pert_QCD = ...; add process
+    ...'), so the first occurrence is searched inside each command, as for a
+    single concatenated command line.
+    """
+    commands = list(commands)
+    for idx, cmd in enumerate(commands):
+        if 'add process' in cmd:
+            commands[idx] = cmd.replace('add process', 'generate', 1)
+            break
+    return commands
+
+
 class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
     """Basic interface for reweighting operation"""
 
@@ -542,8 +557,9 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         model_line = self.banner.get('proc_card', 'full_model_line')
 
         # combine_ij (event clustering) needs the model.
-        model = self.banner.get('proc_card', 'model')
-        self.load_model(model, True, False)
+        if self.inc_sudakov:
+            model = self.banner.get('proc_card', 'model')
+            self.load_model(model, True, False)
 
         self._ensure_fxfx_cluster_catalogue()
         if self.inc_sudakov:
@@ -1946,10 +1962,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         if not command_list:
             raise Exception("No processes defined for reweighting generation.")
 
-        for idx, cmd in enumerate(command_list):
-            if cmd.startswith("add process"):
-                command_list[idx] = cmd.replace("add process", "generate", 1)
-                break
+        command_list = first_add_process_to_generate(command_list)
 
         def exec_command_sequence(cmds, log_fxfx_failure=False):
             for idx, cmd in enumerate(cmds):
@@ -1979,10 +1992,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                 elif 'noborn' in nlo_order:
                     nlo_order = nlo_order.replace('noborn', 'virt')
                 fallback_commands.append("add process %s [%s] %s;" % (base,nlo_order,post))
-            for idx, cmd in enumerate(fallback_commands):
-                if cmd.startswith("add process"):
-                    fallback_commands[idx] = cmd.replace("add process", "generate", 1)
-                    break
+            fallback_commands = first_add_process_to_generate(fallback_commands)
             if fallback_commands:
                 logger.info("RETRY with fallback virtual commands.")
                 exec_command_sequence(fallback_commands)
@@ -2181,10 +2191,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         if not command_list:
             return False
 
-        for idx, cmd in enumerate(command_list):
-            if cmd.startswith("add process"):
-                command_list[idx] = cmd.replace("add process", "generate", 1)
-                break
+        command_list = first_add_process_to_generate(command_list)
 
         for cmd in command_list:
             mgcmd.exec_cmd(cmd, precmd=True, errorhandling=False)
