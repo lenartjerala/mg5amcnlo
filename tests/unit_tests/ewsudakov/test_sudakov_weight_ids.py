@@ -11,7 +11,7 @@ from xml.etree import ElementTree as ET
 from madgraph.interface.reweight_interface import ReweightInterface
 from madgraph.various import banner, fxfx_ewsudakov as fx, lhe_parser
 from models import check_param_card
-from tests.unit_tests.fks.test_fxfx_decay_transport import ww_event
+from tests.unit_tests.ewsudakov.test_fxfx_decay_transport import ww_event
 
 
 class TestSudakovWeightIds(unittest.TestCase):

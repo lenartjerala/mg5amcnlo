@@ -11,7 +11,7 @@ from unittest import mock
 import numpy as np
 
 from madgraph.various import fxfx_ewsudakov as fx, lhe_parser
-from tests.unit_tests.fks.test_fxfx_decay_transport import ww_event
+from tests.unit_tests.ewsudakov.test_fxfx_decay_transport import ww_event
 
 
 class CatalogueDriver(fx.FxFxEWSudakovMixin):
