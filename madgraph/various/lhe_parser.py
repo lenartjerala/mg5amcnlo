@@ -2904,22 +2904,18 @@ class Event(list):
         #3. check mass
 
     def check_kinematics_only(self):
-        """Check 4-momentum conservation with a scale-aware tolerance.
+        """Check momentum conservation and masses of the status +-1 particles.
 
-        The relative imbalance |DeltaP_i| / E_scale is compared against `eps_rel`;
-        if the absolute imbalance |DeltaP_i| also falls below `eps_abs`, the event
-        passes regardless of geometry.  E_scale = Sum|E_initial| - the partonic
-        CM energy - never zero for a physical event, invariant under spatial
-        rotations performed before this check.
+        Each component of DeltaP = Sum_out p - Sum_in p must satisfy
+        |DeltaP_i| <= max(eps_abs, eps_rel * E_scale), where E_scale is the
+        summed |E| of the incoming particles (of the outgoing ones if that is
+        zero).  Nonzero recorded masses must match the computed ones to 1e-3
+        (relative).
         """
-        eps_abs = 1.0e-3      # GeV (1 MeV).  With unclamped zboost/zboost_inv/
-                              # pt_boost the post-cluster residue is at machine
-                              # epsilon (~1e-12 GeV), so 1 MeV gives 9 orders
-                              # of safety margin while still catching any real
-                              # momentum-conservation violation.
-        eps_rel = 1.0e-6      # 1 ppm against E_scale=Sum|E_initial|.
+        eps_abs = 1.0e-3      # GeV; boost/clustering round-off is ~1e-12 GeV
+        eps_rel = 1.0e-6      # relative to E_scale
 
-        P  = [0.0, 0.0, 0.0, 0.0]   # signed sum (E, px, py, pz)
+        P  = [0.0, 0.0, 0.0, 0.0]   # DeltaP (E, px, py, pz)
         E_scale = 0.0
         for p in self:
             if p.status == -1:
@@ -4407,12 +4403,9 @@ class FourMomentum(object):
                             self.px,
                             self.py,
                             gamma*self.pz - gammabeta*self.E])
-        # No per-particle |out.pz| < 1e-6 * out.E clamp: applied to particles
-        # other than the boost's own pboost (as in _fks_isr_mapping /
-        # _fks_fsr_mapping), such a clamp would delete sub-threshold momentum
-        # components that algebraically compensate other particles' boosted
-        # momenta, generating MeV-scale residue for TeV-scale particles. The
-        # boost stays Lorentz-linear.
+        # Exactly linear, no zeroing of small components: the FKS ISR mapping
+        # boosts every particle of an event, and zeroing |pz| < 1e-6 E would leave
+        # an MeV-scale momentum imbalance at TeV energies.
         return out
 
     def zboost_inv(self, pboost=None, E=0, pz=0):
@@ -4432,7 +4425,7 @@ class FourMomentum(object):
                             self.px,
                             self.py,
                             gamma*self.pz + gammabeta*self.E])
-        # No small-component clamp, as in zboost (Lorentz linearity).
+        # Exactly linear, as zboost.
         return out
 
 
@@ -4457,11 +4450,7 @@ class FourMomentum(object):
                             -gamma*betax*self.E + (1.0 + (gamma-1.0)*betax**2/(beta**2))*self.px + (gamma-1.0)*betax*betay/(beta**2)*self.py,
                             -gamma*betay*self.E + ((gamma-1.0)*betax*betay/(beta**2))*self.px + (1.0+(gamma-1.0)*(betay**2)/(beta**2))*self.py,
                             self.pz])
-        # No per-particle |out.{px,py}| < 1e-6 * out.E clamps: _fks_isr_mapping
-        # applies pt_boost to every particle in orig_momenta with the same
-        # pboost, and a clamp threshold of 1e-6*E_particle (~MeV for TeV
-        # particles) would delete sub-threshold compensating components and
-        # leave a structured MeV residue at check_kinematics_only.
+        # Exactly linear, as zboost (no zeroing of small px, py).
         return out
 
     def boost_beta(self,beta,mom):

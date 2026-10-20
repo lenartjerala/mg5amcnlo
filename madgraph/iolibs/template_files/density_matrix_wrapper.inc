@@ -1,36 +1,26 @@
-C ==========================================================================
-C     Density Matrix Delta-Only Wrapper for EW Sudakov
-C ==========================================================================
-C
-C     This wrapper ONLY computes per-resonance-helicity Sudakov corrections.
-C     The B[h,h'] density matrix is computed by Python via DensityHelper
-C     (using Valentin's GET_DENSITY from standalone rw_me_density_prod modules).
-C
-C     Architecture:
-C       - Fortran: Sudakov kernels via sudakov_wrapper (Phase 2)
-C       - Python:  Density matrices via DensityHelper (replaces Phase 1)
-C       - Python:  Normalization delta = delta*B / B[h,h] (replaces Phase 3)
-C
-C     Physics: B^EWSL[h,h'] = B[h,h'] * (1 + delta_h + delta*_h')
-C
-C ==========================================================================
+C     EW Sudakov corrections per resonance-helicity configuration h for
+C     the spin-density reweighting
+C        B^EWSL[h,h'] = B[h,h'] * (1 + delta_h + delta*_h'),
+C     with the amplitude-level delta_h averaged over spectator helicities
+C     (exact for h = h' only). The density matrix B[h,h'] is computed
+C     separately (GET_DENSITY of the standalone density-matrix output).
 
       subroutine density_matrix_wrapper(p, nres, res_indices, res_dims,
      $     density_born, density_delta, born_diag)
 C --------------------------------------------------------------------------
-C     Compute per-helicity Sudakov corrections delta_h
-C
 C     Arguments:
-C       p(0:3, nexternal-1)  - external momenta
-C       nres                 - number of resonances to track
-C       res_indices(nres)    - which legs are resonances (1-based)
+C       p(0:3, nexternal-1)  - external momenta (restored on exit)
+C       nres                 - number of resonances
+C       res_indices(nres)    - resonance leg positions (1-based)
 C       res_dims(nres)       - spin dimension per resonance (2=fermion, 3=vector)
-C       density_born(*)      - output: ZEROS (Python computes via DensityHelper)
-C       density_delta(*)     - output: unnormalized Sudakov corrections delta*B
-C       born_diag(*)         - output: per-helicity Born summed over spectators (/IDEN)
-C
-C     Note: density_born returns zeros (Python uses DensityHelper for B).
-C           born_diag carries per-helicity Born for IDEN-free normalization.
+C       density_born(*)      - output: zeros, D*(D+1)/2 entries
+C       density_delta(*)     - output: sum of ME*delta, D entries
+C       born_diag(*)         - output: Born, D entries
+C     D = product of res_dims. density_delta and born_diag are summed over
+C     spectator helicities and both carry 1/IDEN;
+C     delta_h = density_delta(h)/born_diag(h). ME is the Born, or the
+C     Goldstone-boson ME for configurations with longitudinal vector legs;
+C     for those delta_h includes the ratio of the Goldstone ME to the Born.
 C --------------------------------------------------------------------------
       implicit none
       include 'nexternal.inc'
@@ -51,10 +41,8 @@ C     Local variables
       integer h_indices(10)        ! Individual resonance hel indices (0-based)
       integer hel_values(10)       ! Actual helicity values (-1, 0, +1)
 
-C     For resonance-helicity selection
-      integer allow_hel(300)       ! Max 10 res * 3 states each = 30 combos * 10 = 300
+      integer allow_hel(300)       ! D*nres entries, size checked by the caller
 
-C     For Phase 2: per-helicity Sudakov via scalar wrapper
       double complex delta_total_this_hel
       double precision p_save(0:3, nexternal-1)
       integer ileg, imu
@@ -63,7 +51,7 @@ C     For Phase 2: per-helicity Sudakov via scalar wrapper
       double complex CZERO
       parameter (CZERO = (0d0, 0d0))
 
-C     Common blocks for reading scalar wrapper per-helicity results
+C     Results of sudakov_wrapper
       include 'orders.inc'
       DOUBLE COMPLEX AMP_SPLIT_EWSUD(AMP_SPLIT_SIZE)
       COMMON /TO_AMP_SPLIT_EWSUD/ AMP_SPLIT_EWSUD
@@ -84,7 +72,6 @@ C     Resonance-helicity selection for sudakov_wrapper
       integer ewsud_res_hel(10)
       common/to_ewsud_res_sel/ewsud_nres, ewsud_res_pos, ewsud_res_hel
 
-C     Filter helicities flag
       logical sud_filter_hel
       COMMON /to_filter_hel/ sud_filter_hel
 
@@ -96,14 +83,11 @@ C --------------------------------------------------------------------------
 C     BEGIN CODE
 C --------------------------------------------------------------------------
 
-C     Compute total dimension D = product of res_dims
       total_dim = 1
       do i = 1, nres
         total_dim = total_dim * res_dims(i)
       enddo
 
-C     Initialize outputs
-C     density_born and born_diag return zeros - Python computes B via DensityHelper
       do i = 1, total_dim * (total_dim + 1) / 2
         density_born(i) = CZERO
       enddo
@@ -112,22 +96,17 @@ C     density_born and born_diag return zeros - Python computes B via DensityHel
         born_diag(i) = 0d0
       enddo
 
-C ==========================================================================
-C     Build ALLOW_HEL array for resonance-helicity selection
-C ==========================================================================
-C     ALLOW_HEL layout: for each combination ih=1..total_dim,
-C       ALLOW_HEL((ih-1)*nres+1 : ih*nres) = helicity values for resonances
-C ==========================================================================
+C     allow_hel((ih-1)*nres+n) = helicity of resonance n in configuration
+C     ih = 1..D, with ih-1 = h_1 + res_dims(1)*(h_2 + res_dims(2)*(...))
+C     for 0-based indices h_n (first resonance runs fastest).
 
       do ih = 1, total_dim
-C       Convert 1-based ih to 0-based flat index, then to individual indices
         k = ih - 1
         do n = 1, nres
           h_indices(n) = mod(k, res_dims(n))
           k = k / res_dims(n)
         enddo
 
-C       Convert 0-based indices to actual helicity values
         do n = 1, nres
           if (res_dims(n) .eq. 2) then
 C           Fermion: 0 -> -1, 1 -> +1
@@ -136,31 +115,18 @@ C           Fermion: 0 -> -1, 1 -> +1
 C           Vector: 0 -> -1, 1 -> 0, 2 -> +1
             hel_values(n) = h_indices(n) - 1
           else
-C           Unknown spin - use index directly
             hel_values(n) = h_indices(n)
           endif
         enddo
 
-C       Store in ALLOW_HEL
         do n = 1, nres
           allow_hel((ih-1)*nres + n) = hel_values(n)
         enddo
       enddo
 
-C ==========================================================================
-C     PHASE 1: SKIPPED - Python computes B via DensityHelper
-C ==========================================================================
-C     The broken GET_DENSITY call has been removed.
-C     Python uses DensityHelper (which calls Valentin's GET_DENSITY from
-C     the standalone rw_me_density_prod modules) to compute B[h,h'].
-C ==========================================================================
+C     For each configuration ih, sudakov_wrapper restricted to the
+C     resonance helicities allow_hel(ih) sums over spectator helicities.
 
-C ==========================================================================
-C     PHASE 2: Per-resonance-helicity Sudakov corrections
-C     Use resonance-helicity selection (ewsud_nres) to sum over spectators
-C ==========================================================================
-
-C     Save and disable helicity filtering for density calls
       saved_filter_hel = sud_filter_hel
       sud_filter_hel = .false.
 
@@ -172,16 +138,12 @@ C     Save momenta (PAR numerical derivatives may modify p)
       enddo
 
       do ih = 1, total_dim
-C       Restore momenta before each call (PAR may corrupt p)
         do ileg = 1, nexternal-1
           do imu = 0, 3
             p(imu, ileg) = p_save(imu, ileg)
           enddo
         enddo
 
-C       Set resonance-helicity selection
-C       This makes sudakov_wrapper sum over all full helicities where
-C       the resonance legs have the specified helicity values
         ewsud_nres = nres
         do n = 1, nres
           ewsud_res_pos(n) = res_indices(n)
@@ -190,27 +152,19 @@ C       the resonance legs have the specified helicity values
 
         CALCULATEDBORN = .FALSE.
 
-C       Call scalar wrapper - it sums over spectator helicities
         call sudakov_wrapper(p)
 
-C       Read Born-weighted results from common blocks
         delta_total_this_hel = amp_split_ewsud_lsc(1)
      $       + amp_split_ewsud_ssc(1)
      $       + amp_split_ewsud_xxc(1)
      $       + amp_split_ewsud_par(1)
 
-C       Store unnormalized (Born-weighted) delta
-C       Python will normalize: delta[h] = density_delta[h] / born_diag[h]
         density_delta(ih) = delta_total_this_hel
-C       Per-helicity Born (summed over spectators, /IDEN).
-C       IDEN cancels in delta/born ratio, so no Python IDEN needed.
         born_diag(ih) = amp_born_sumhel
       enddo
 
-C     Reset resonance-helicity selection
       ewsud_nres = 0
 
-C     Restore filter and momenta
       sud_filter_hel = saved_filter_hel
       CALCULATEDBORN = .FALSE.
       do ileg = 1, nexternal-1
@@ -218,14 +172,6 @@ C     Restore filter and momenta
           p(imu, ileg) = p_save(imu, ileg)
         enddo
       enddo
-
-C ==========================================================================
-C     PHASE 3: SKIPPED - Python normalizes using DensityHelper's B diagonal
-C ==========================================================================
-C     delta[h] is returned unnormalized (= delta*B[h]).
-C     Python will compute: delta[h] = delta*B[h] / born_diag[h]
-C     where born_diag[h] is returned alongside delta (IDEN cancels).
-C ==========================================================================
 
       return
       end

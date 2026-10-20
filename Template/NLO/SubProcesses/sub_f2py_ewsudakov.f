@@ -49,22 +49,19 @@ cc
       COMMON /to_s_to_rij/ s_to_rij
       logical rij_ge_mw
       COMMON /rij_ge_mw/ rij_ge_mw
-C     Debug flag that must be 0 for Sudakov functions to return non-zero
+C     deb_settozero must be 0 (nonzero values switch off Sudakov terms)
       integer deb_settozero
       common /to_deb_settozero/deb_settozero
-C     Helicity filter flag (defaults .true. via BLOCK DATA in
-C     ewsudakov_functions.f; must be cleared per call to defeat the
-C     SAVE'd GOOD_HEL/FIRSTTIME_HEL cache in ewsudakov_wrapper.f, which
-C     would otherwise freeze the helicity mask on event #1)
+C     sud_filter_hel (default .true.) is cleared on every call: the
+C     helicity mask good_hel of ewsudakov_wrapper.f is set at the first
+C     call and would otherwise be applied to all later events
       logical sud_filter_hel
       common /to_filter_hel/ sud_filter_hel
 C-----
 C  BEGIN CODE
 C-----
 
-C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       deb_settozero = 0
-C     Disable cross-event helicity filter
       sud_filter_hel = .false.
 
       nfksprocess=1
@@ -155,15 +152,16 @@ C     Disable cross-event helicity filter
      $     res_indices, res_dims, density_born, density_delta,
      $     density_delta_var, born_diag, results)
 c**************************************************************************
-c     Density matrix EW Sudakov computation for spin-correlated reweighting
-c     with resonances. Returns the Born density matrix B[h,h'] and
-c     diagonal Sudakov corrections delta_h for each helicity configuration.
-c
-c     Returns TWO delta arrays:
-c       density_delta     - central (s_to_rij=.true., with higher-order corrections)
-c       density_delta_var - variation (s_to_rij=.false., without corrections)
-c
-c     Note: rij_ge_mw is always .true. for FxFx (clustering ensures s_ij > MW^2)
+c     EW Sudakov corrections per resonance-helicity configuration for the
+c     spin-density reweighting (see density_matrix_wrapper). Outputs, with
+c     D = product of res_dims(1:nres):
+c       density_delta(1:D)     - sum of ME*delta, s_to_rij=.true.
+c       density_delta_var(1:D) - the same with s_to_rij=.false.
+c       born_diag(1:D)         - Born, summed over spectator helicities
+c       density_born           - zeros
+c       results(1)             - Born amp_split(1); results(2:6) = 0
+c     delta_h = density_delta(h)/born_diag(h) is amplitude-level. sud_mod=1,
+c     rij_ge_mw=.true. (|r_ij| < MW^2 set to +-MW^2).
 c**************************************************************************
       implicit none
 
@@ -230,14 +228,12 @@ C     Local variables
       common /to_s_to_rij/ s_to_rij
       logical rij_ge_mw
       common /rij_ge_mw/ rij_ge_mw
-C     Debug flag that must be 0 for Sudakov functions to return non-zero
+C     deb_settozero must be 0 (nonzero values switch off Sudakov terms)
       integer deb_settozero
       common /to_deb_settozero/deb_settozero
 
-C     Helselect mechanism (density wrapper uses this per-helicity)
       integer ewsud_helselect
       common/to_ewsud_helselect/ewsud_helselect
-C     Filter helicities flag
       logical sud_filter_hel
       COMMON /to_filter_hel/ sud_filter_hel
 
@@ -253,7 +249,6 @@ C     fixed-size resonance arrays.
         stop 1
       endif
 
-C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       deb_settozero = 0
 
       nfksprocess = 1
@@ -268,16 +263,15 @@ C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       call update_as_param()
       p_born(:,:) = p_born_in(:,:)
 
-C     Initialize outputs
       total_dim = 1
       do i = 1, nres
         total_dim = total_dim * res_dims(i)
       enddo
 
-C     Guard the fixed-size buffers: density_delta/born_diag are MAX_DIM
-C     and allow_hel in the density wrapper is 300 (indexed up to
-C     total_dim*nres). Oversize would be a silent overrun through the
-C     assumed-size dummies, so stop loudly instead.
+C     density_delta/born_diag hold MAX_DIM entries and allow_hel in
+C     density_matrix_wrapper holds 300 (indexed up to total_dim*nres);
+C     both are passed as assumed-size dummies, so an oversize helicity
+C     space would overrun them silently.
       if (total_dim.gt.MAX_DIM .or. total_dim*nres.gt.300) then
         write (*,*) 'ERROR in density_sudakov_py: helicity space too'
         write (*,*) ' large: total_dim=', total_dim, ' nres=', nres
@@ -297,36 +291,26 @@ C     assumed-size dummies, so stop loudly instead.
         results(i) = 0d0
       enddo
 
-C     Set standard Sudakov mode (rij_ge_mw always true for FxFx - clustering ensures s_ij > MW^2)
       sud_mod = 1
       rij_ge_mw = .true.
 
-C     Just compute Born for normalization check (Sudakov done in density wrapper)
       call sborn(p_born, born)
       wgt_born = amp_split(1)
       results(1) = wgt_born
 
-C     Compute density matrix B[h,h'] and Sudakov corrections delta[h]
-C     Phase 1: JAMP + color contraction -> B[h,h']
-C     Phase 2: Per-helicity Sudakov via scalar wrapper (handles goldstone,
-C              comp_idfac, SSC_C, nondiag, PAR automatically)
-C     Phase 3: Normalize delta by diagonal Born
-C
-C     Initialize helselect and disable filtering for density computation
+C     No single-helicity selection, no helicity filtering
       ewsud_helselect = 0
       sud_filter_hel = .false.
 
-C     CENTRAL: s_to_rij = .true. (with higher-order s->rij corrections)
+C     Central: s_to_rij = .true. (SSC keeps the log^2(|r_ij|/s) and
+C     imaginary-part terms of the s -> r_ij replacement)
       s_to_rij = .true.
       call density_matrix_wrapper(p_born, nres, res_indices, res_dims,
      $       density_born, density_delta, born_diag)
       results(2) = 0d0
 
-C     VARIATION: s_to_rij = .false. (without higher-order corrections)
-C     Recompute only the delta, reusing density_born structure
+C     Variation: s_to_rij = .false. (born_diag is recomputed unchanged)
       s_to_rij = .false.
-C     Call wrapper again with variation setting, store in density_delta_var
-C     Note: density_born and born_diag are recomputed but should be identical
       call density_matrix_wrapper(p_born, nres, res_indices, res_dims,
      $       density_born, density_delta_var, born_diag)
       results(3) = 0d0

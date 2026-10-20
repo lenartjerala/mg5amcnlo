@@ -1,10 +1,6 @@
-################################################################################
-#
-# Regression tests for the triangular density-matrix convention shared by the
-# generated Fortran GET_INTER routines and
-# fxfx_ewsudakov.unpack_density_triangle.
-#
-################################################################################
+"""Packed-triangle density-matrix convention of the generated Fortran GET_INTER
+routines and fxfx_ewsudakov.unpack_density_triangle, and DensityMatrix
+contraction against amplitude-level expressions."""
 from __future__ import division
 
 import os
@@ -155,7 +151,8 @@ class TestDensityContraction(unittest.TestCase):
 
     def test_two_resonance_tensor_product(self):
         # Production index h = 3*h1 + h2 (first resonance varies slowest),
-        # matching itertools.product and np.kron in build_decay_tensor_product.
+        # matching the itertools.product helicity enumeration and the np.kron
+        # of build_decay_tensor_product.
         rng = np.random.default_rng(5)
         for _ in range(50):
             prod_amp = rng.normal(size=9) + 1j * rng.normal(size=9)

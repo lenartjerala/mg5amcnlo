@@ -1,36 +1,10 @@
-################################################################################
-#
-# Unit tests for the FKS kinematic reshuffling used by the FxFx EW-Sudakov
-# clustering (madgraph/various/fxfx_ewsudakov.py).
-#
-# Covers:
-#   - exactness of the on-shell FSR mapping (massive and massless spectators)
-#   - the ISR mapping (momentum conservation, massless beams, reduced sqrt(s))
-#   - the decay-product on-shell transformation (2-body and multi-body)
-#   - the reachable fallback branches of _fks_fsr_mapping via engineered
-#     kinematics: zero_krec_momentum, negative_energy, negative_r,
-#     unreachable_target (incl. the spurious roots of the squared quadratic),
-#     no_solution, degenerate, collinear_unphysical, and for soft massive
-#     recoil systems spurious_root and inexact. NOT covered:
-#     degenerate_collinear (vestigial: only reachable for 0 < R < 1e-10 after
-#     the R <= 0 guard), superluminal (boundary-only: all real roots of the
-#     squared quadratic satisfy |beta| <= 1 identically)
-#   - soft lightlike recoil (rescaling, in the CM and in the laboratory frame
-#     with rounded input momenta), the boost of light massive spectators, the
-#     massive treatment of soft wide-angle recoil systems, the pole criterion
-#     of every success for a boosted q, and decay leaves following the
-#     spectator map exactly
-#   - mass-label consistency and method accounting in
-#     fxfx_merge_particles_kinematics (label == sqrt(p^2) for fallbacks,
-#     pole mass for successes; check_kinematics_only passes in both cases)
-#   - the A >= |B| spurious-root safety property of the quadratic solver
-#   - fks_methods threading and skip sentinels in _apply_forced_clustering
-#   - the counting gate (_FKS_COUNT_ACTIVE) and fks_reset_accounting()
-#
-# NOT covered here (requires compiled f2py Sudakov modules): the unit_weight
-# policy branch inside the reweight drivers and the end-of-run summary hook in
-# reweight_interface.
-################################################################################
+"""FKS kinematic reshuffling of the FxFx EW-Sudakov clustering (fxfx_ewsudakov).
+
+Every fallback method of _fks_fsr_mapping has an engineered configuration
+except fks_fsr_degenerate_collinear (reachable only for 0 < R < 1e-10, since
+R <= 0 is caught as fks_fsr_unreachable_target) and fks_fsr_superluminal
+(boundary-only: every real root of the squared quadratic has |beta| <= 1).
+"""
 from __future__ import division
 
 import math
@@ -103,7 +77,6 @@ class TestFSRSuccessPath(unittest.TestCase):
     """The mapping must place the mother exactly on the pole mass."""
 
     def test_massless_spectator_onshell(self):
-        # CM 500 GeV; single massless spectator along +x; pair -> W
         beams = [FourMomentum([250, 0, 0, 250]), FourMomentum([250, 0, 0, -250])]
         spec = FourMomentum([100, 100, 0, 0])
         p_a = FourMomentum([150, 150, 0, 0])
@@ -113,7 +86,6 @@ class TestFSRSuccessPath(unittest.TestCase):
         self.assertEqual(res["method"], "fks_fsr_massive_onshell")
         mother = res["mother"]
         self.assertAlmostEqual(math.sqrt(_m2(mother)), fx.MW_POLE, places=6)
-        # exact momentum conservation
         total = FourMomentum(mother)
         for p in res["spectators"].values():
             total += p
@@ -195,7 +167,7 @@ class TestFSRFallbackBranches(unittest.TestCase):
     def test_negative_energy(self):
         # sqrt(s) = 60 GeV < M_W: no on-shell W + spectator fits in the event
         beams = [FourMomentum([30, 0, 0, 30]), FourMomentum([30, 0, 0, -30])]
-        spec = FourMomentum([10, 10, 0, 0])  # massless
+        spec = FourMomentum([10, 10, 0, 0])
         p_a = FourMomentum([20, -20, 0, 0])
         p_b = FourMomentum([30, 10, 0, 0])
         pair = p_a + p_b
@@ -218,11 +190,9 @@ class TestFSRFallbackBranches(unittest.TestCase):
     def test_unreachable_target(self):
         # sqrt(s)=60, light massive spectator system (m_rec=5): R < 0, i.e. the
         # event cannot host an on-shell W plus this spectator system. The
-        # squared quadratic HAS |beta|<1 roots here, but they all sit on the
-        # spurious -R branch (gamma(A+beta B) = -R): before the explicit
-        # R <= 0 guard the mapping accepted one, reported
-        # "fks_fsr_massive_onshell", and delivered a mother at a WRONG mass
-        # (~28 GeV for this configuration). This test pins the guard.
+        # squared quadratic still has |beta|<1 roots, all on the spurious
+        # branch gamma(A+beta B) = -R, with the mother at 28 GeV; the R <= 0
+        # guard rejects the configuration first.
         beams = [FourMomentum([30, 0, 0, 30]), FourMomentum([30, 0, 0, -30])]
         E_r, p_r = math.sqrt(34.0), 3.0  # m_rec^2 = 25
         (k1E, _x, _y, k1z), (k2E, _x2, _y2, k2z) = _split_massless_z(E_r, p_r)
@@ -235,8 +205,6 @@ class TestFSRFallbackBranches(unittest.TestCase):
         momenta = beams + [p_a, p_b, spec1, spec2]
         res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
         self._assert_fallback(res, momenta, "fks_fsr_unreachable_target")
-        # and the wrong-mass acceptance must NOT happen: the naive mother is
-        # far below the pole, and no branch may relabel it as on-shell
         self.assertLess(math.sqrt(max(0.0, _m2(res["mother"]))), fx.MW_POLE - 10.0)
 
     def test_no_solution(self):
@@ -282,10 +250,7 @@ class TestFSRFallbackBranches(unittest.TestCase):
 
     def test_threshold_collinear_is_unreachable(self):
         # B = 0 and R = 0: s + m_rec^2 = M^2 with a q-collinear massive
-        # spectator. The event sits exactly AT threshold (beta = +-1 would be
-        # needed), so the R <= 0 unreachable-target guard fires before the
-        # legacy B~0 "degenerate_collinear" branch, which is now reachable only
-        # for 0 < R < 1e-10 and kept as a vestigial safety net.
+        # spectator, exactly at threshold (beta = +-1 would be needed).
         M2 = fx.MW_POLE**2
         beams = [FourMomentum([40, 0, 0, 40]), FourMomentum([24, 0, 0, -24])]
         q = beams[0] + beams[1]  # (64, 0, 0, 16)
@@ -301,9 +266,8 @@ class TestFSRFallbackBranches(unittest.TestCase):
         p_b = FourMomentum([pair.E / 2, pair.px / 2, 0, pair.pz / 2])
         momenta = beams + [p_a, p_b, spec]
         res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
-        # rhs is an exact float 0 for this construction; do not depend on which
-        # non-success branch classifies it — the physics statement is only that
-        # an at-threshold configuration must never be labelled a success.
+        # R is an exact float 0 here (unreachable_target, while 0 < R < 1e-10
+        # would give degenerate_collinear); only the non-success is pinned.
         self.assertNotIn(res["method"], fx.FKS_SUCCESS_METHODS)
         naive = self._naive(momenta, 2, 3)
         for comp in ("E", "px", "py", "pz"):
@@ -404,10 +368,10 @@ class TestFSRNumericalRobustness(unittest.TestCase):
             for comp in ("E", "px", "py", "pz"):
                 self.assertEqual(getattr(leaf, comp), getattr(spec, comp))
 
-    def test_lab_frame_lightlike_spectator(self):
-        # q Z -> q in the laboratory frame (beta_q = -0.995) with a gluon
-        # spectator whose LHE-rounded momentum has m^2 = 5.8e-7 GeV^2: the
-        # rescaling solves the on-shell condition for these input momenta.
+    def test_boosted_lightlike_spectator(self):
+        # q Z -> q with beta_q = -0.995 and a gluon spectator whose LHE-rounded
+        # momentum has m^2 = 5.8e-7 GeV^2: the clustering maps it as a lightlike
+        # recoil system and the mother reaches the pole.
         event = _lhe_event(
             [
                 (21, -1, 0.0, 8.520120244, 0.0, 0.0, 8.520120244),
@@ -426,10 +390,10 @@ class TestFSRNumericalRobustness(unittest.TestCase):
             ]
         )
         q = FourMomentum(event[0]) + FourMomentum(event[1])
-        res = fx._fks_fsr_mapping(
+        res = fx._fks_fsr_mapping_cm(
             2, 3, [{"number": 3, "id": 2}], [FourMomentum(p) for p in event]
         )
-        self.assertEqual(res["spectator_transform"][0][0], "rescale")
+        self.assertEqual(res["spectator_transform"][1][0], "rescale")
         method = fx.fxfx_merge_particles_kinematics(
             event, 2, 3, [{"number": 3, "id": 2}]
         )
@@ -802,16 +766,16 @@ class TestFSRNumericalRobustness(unittest.TestCase):
 
 
 class TestMergeLabelConsistency(unittest.TestCase):
-    """fxfx_merge_particles_kinematics: mass label always matches sqrt(p^2),
-    the method string is returned and counted, and check_kinematics_only
-    passes for successes AND fallbacks."""
+    """fxfx_merge_particles_kinematics: mass label matches sqrt(p^2), the
+    method is returned and counted, check_kinematics_only passes for successes
+    and fallbacks."""
 
     def _merge(self, entries, i, j, mother_pdg):
         event = _mk_event(entries)
         before = dict(fx.FKS_METHOD_COUNTS)
         cons_before = fx.FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"]
-        # Enable the counting gate (normally set by _cluster_fxfx_event for the
-        # first clustering pass of each event of the main loop).
+        # In production _cluster_fxfx_event opens the counting gate for the
+        # first clustering pass of each main-loop event.
         prev_gate = fx._FKS_COUNT_ACTIVE
         fx._FKS_COUNT_ACTIVE = True
         try:
@@ -869,7 +833,7 @@ class TestMergeLabelConsistency(unittest.TestCase):
         m_kin = math.sqrt(max(0.0, _m2(FourMomentum(mother))))
         self.assertAlmostEqual(mother.mass, m_kin, places=9)
         self.assertNotAlmostEqual(mother.mass, fx.MW_POLE, places=1)
-        # the >0.1% label/kinematics gate must NOT fire on the fallback
+        # passes the 0.1% label/kinematics mass gate
         event.check_kinematics_only()
 
     def test_zero_krec_label_is_invariant_mass(self):
@@ -901,6 +865,66 @@ class TestMergeLabelConsistency(unittest.TestCase):
         )
         self.assertEqual(method, "fks_isr_cm_boost")
         self.assertEqual(len(event), 3)
+
+
+class TestFSRFrame(unittest.TestCase):
+    """The FSR clustering is defined in the partonic CM frame: clustering a
+    z-boosted event and boosting the result back reproduces the CM result."""
+
+    @staticmethod
+    def _cm_event(spectators):
+        beams = [FourMomentum([400, 0, 0, 400]), FourMomentum([400, 0, 0, -400])]
+        p_a = _massless_momentum(220.0, 1.1, 0.4)
+        p_b = beams[0] + beams[1] - p_a
+        for spec in spectators:
+            p_b = p_b - spec
+        return beams + [p_a, p_b] + list(spectators)
+
+    def _check_boost_covariance(self, spectators, spectator_pids, masses):
+        z_hat = (0, 0, 1)
+        cm = self._cm_event(spectators)
+        lab = [fx._boost_along_direction(p, -0.6, z_hat) for p in cm]
+        pids = [21, 21, 13, -14] + list(spectator_pids)
+        labels = [0.0, 0.0, 0.0, 0.0] + list(masses)
+        events = []
+        for momenta in (cm, lab):
+            event = _lhe_event(
+                [
+                    (pid, -1 if k < 2 else 1, mass, p.E, p.px, p.py, p.pz)
+                    for k, (pid, mass, p) in enumerate(zip(pids, labels, momenta))
+                ]
+            )
+            method = fx.fxfx_merge_particles_kinematics(
+                event, 2, 3, [{"number": 3, "id": -24}]
+            )
+            self.assertEqual(method, "fks_fsr_massive_onshell")
+            events.append(event)
+        for p_cm, p_lab in zip(events[0], events[1]):
+            back = fx._boost_along_direction(FourMomentum(p_lab), 0.6, z_hat)
+            for comp in ("E", "px", "py", "pz"):
+                self.assertAlmostEqual(
+                    getattr(back, comp), getattr(p_cm, comp), delta=1e-9 * 800.0
+                )
+
+    def test_massive_spectator(self):
+        # A single W spectator, as in the q + W -> q' clusterings of WW events.
+        p = 60.0
+        w = FourMomentum(
+            [
+                math.sqrt(p**2 + fx.MW_POLE**2),
+                p * math.sin(2.0) * math.cos(1.3),
+                p * math.sin(2.0) * math.sin(1.3),
+                p * math.cos(2.0),
+            ]
+        )
+        self._check_boost_covariance([w], [24], [fx.MW_POLE])
+
+    def test_massive_spectator_system(self):
+        self._check_boost_covariance(
+            [_massless_momentum(60.0, 2.0, 1.3), _massless_momentum(45.0, 0.7, 2.9)],
+            [21, 21],
+            [0.0, 0.0],
+        )
 
 
 class TestISRMapping(unittest.TestCase):
@@ -966,10 +990,8 @@ class TestDecayTransform(unittest.TestCase):
         self.assertAlmostEqual(out[1].pz, d2.pz, places=9)
 
     def test_decay_follows_prepared_frame_without_wigner_rotation(self):
-        # A longitudinal event-frame boost is non-collinear with this W.  With
-        # zero mass shift the decay transport must reduce exactly to that same
-        # frame boost; mixing lab daughters with the prepared mother instead
-        # produces the spurious Wigner rotation fixed by B2.
+        # A longitudinal event-frame boost, non-collinear with this W. With zero
+        # mass shift the decay transport reduces exactly to that frame boost.
         mass = fx.MW_POLE
         w_lab = FourMomentum(
             [math.sqrt(mass**2 + 60.0**2 + 150.0**2), 60.0, 0.0, 150.0]
@@ -998,7 +1020,7 @@ class TestDecayTransform(unittest.TestCase):
             fx._boost_along_direction(d2_rest, -w_p / w_lab.E, w_dir),
         ]
 
-        # beta_z = 0.55, in the exact Event.boost convention recorded by the
+        # beta_z = 0.55, in the Event.boost convention recorded by the
         # preparation routine.
         frame_transform = [
             ("boost_to_cm", FourMomentum([1000.0, 0.0, 0.0, 550.0]))
@@ -1021,8 +1043,9 @@ class TestDecayTransform(unittest.TestCase):
                     getattr(got, component), getattr(want, component), places=10
                 )
 
-        # Pin the regression: the old mixed-frame call is measurably different
-        # despite conserving the total four-momentum.
+        # Without frame_transform the lab daughters are mapped directly onto the
+        # prepared mother: the total four-momentum is conserved, but the
+        # daughters differ from the frame boost by a Wigner rotation.
         mixed_frame = fx._transform_decay_products_to_onshell(
             daughters_lab, w_lab, w_prepared
         )
@@ -1105,7 +1128,7 @@ class TestForcedClusteringPlumbing(unittest.TestCase):
 
     def test_skipped_step_records_sentinel(self):
         event = self._madspin_event()
-        # 1->3 step: not a MadSpin 1->2 topology -> must be skipped AND recorded
+        # 1->3 step: not a MadSpin 1->2 topology, so it is skipped and recorded
         step = fx.ForcedClusterStep(
             children_lhe_idx=[3, 4, 6], mother_lhe_idx=5, mother_pdg=24,
             scale=100.0, depth=0,
@@ -1160,7 +1183,7 @@ class TestAccountingGateAndReset(unittest.TestCase):
 
     def test_reset_clears_counters_and_gate_state(self):
         fx.FKS_METHOD_COUNTS["fks_fsr_massive_onshell"] += 3
-        fx.FKS_QUALITY_COUNTS["events_legacy_fallback"] += 1
+        fx.FKS_QUALITY_COUNTS["events_clustering_failed"] += 1
         fx._FKS_COUNT_ACTIVE = True
         fx._FKS_COUNTED_UPTO = 42
         fx.fks_reset_accounting()
@@ -1183,9 +1206,10 @@ class TestAccountingGateAndReset(unittest.TestCase):
 
 class TestSpuriousRootSafety(unittest.TestCase):
     def test_A_geq_absB(self):
-        """A±B = (q_E±q_n)(E_rec∓p_n) >= 0 for timelike q and physical k_rec,
-        so the min-|beta| root of the squared equation always satisfies the
-        unsquared +R constraint (see _fks_fsr_mapping docstring)."""
+        """A >= |B|: A±B = (q_E±q_n)(E_rec∓p_n) >= 0 for timelike q, physical k_rec.
+
+        Hence for R > 0 every |beta| < 1 root of the squared quadratic solves
+        the unsquared constraint gamma(A + beta B) = R."""
         random.seed(11)
         for _ in range(2000):
             qE = random.uniform(50, 3000)

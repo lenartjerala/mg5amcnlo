@@ -9,9 +9,7 @@ import os
 import sys
 import numpy as np
 
-# =============================================================================
-# Path discovery from __file__ (no hardcoded absolute paths)
-# =============================================================================
+# SubProcesses directory of this output, located from __file__
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _RW_ME_DIR = os.path.dirname(os.path.dirname(_THIS_DIR))  # bin/internal -> bin -> rw_me
@@ -20,9 +18,7 @@ _SUBPROCESSES_DIR = os.path.join(_RW_ME_DIR, 'SubProcesses')
 if _SUBPROCESSES_DIR not in sys.path:
     sys.path.insert(0, _SUBPROCESSES_DIR)
 
-# =============================================================================
-# Generated at export time (filled in by MadGraph)
-# =============================================================================
+# Filled in at export time; PDG keys are ((initial), (sorted final))
 
 pdir_list = [%(pdir_list)s]
 
@@ -30,10 +26,6 @@ pdg2ewsud_dict = {%(pdg2sud)s}
 
 original_pdg_list_dict = {%(pdgsorted)s}
 
-
-# =============================================================================
-# Public API
-# =============================================================================
 
 def ewsudakov(pdgs, p, g):
     """
@@ -58,9 +50,10 @@ def ewsudakov(pdgs, p, g):
     return res
 
 
-# Maximum dimensions for density matrix arrays
-MAX_DIM = 36   # For ttWW: 2*2*3*3 = 36
-MAX_RES = 10   # Maximum number of resonances
+# Caps of density_sudakov_py (sub_f2py_ewsudakov.f); MAX_RES is the f2py
+# shape of res_indices/res_dims and must match it
+MAX_DIM = 36
+MAX_RES = 10
 
 
 def density_sudakov(pdgs, p, g, res_indices, res_dims):

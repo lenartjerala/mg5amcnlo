@@ -54,13 +54,9 @@ COMMON/CCALCULATEDBORN/CALCULATEDBORN
 integer ewsud_helselect
 common/to_ewsud_helselect/ewsud_helselect
 
-C ============================================================
-C Resonance helicity selection (sums over spectators)
-C ============================================================
-C When ewsud_nres > 0, only compute for helicity configs where
-C the resonance legs (at positions ewsud_res_pos) have helicities
-C matching ewsud_res_hel. This sums over spectator helicities.
-C ============================================================
+C Resonance-helicity selection: if ewsud_nres > 0, only helicity
+C configurations whose legs ewsud_res_pos have the helicities
+C ewsud_res_hel are summed, i.e. the sum runs over the spectators.
       integer ewsud_nres
       integer ewsud_res_pos(10)
       integer ewsud_res_hel(10)
@@ -125,8 +121,6 @@ DO IHEL=hel_min, hel_max
 C if an helicity is selected, then filter it
 if (ewsud_helselect.ne.0.and.ewsud_helselect.ne.ihel) cycle
 
-C Resonance-helicity filter: skip if resonance hel doesn't match
-C This enables spectator summation while fixing resonance helicities
 if (ewsud_nres.gt.0) then
   res_hel_match = .true.
   do ires = 1, ewsud_nres

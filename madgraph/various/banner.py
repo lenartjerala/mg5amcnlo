@@ -4396,10 +4396,10 @@ class RunCardLO(RunCard):
                       "dummy_boostframe": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_wgt_custom": pjoin("SubProcesses","dummy_fct.f"),
-                      # bias_weight_function: NLO-style name (kept here for parity with NLO map).
+                      # NLO name of the bias function, as in RunCardNLO
                       "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
-                      # dummy_bias_fct: legacy no-op stub name some user-generated LHE banners
-                      # carry via custom_fcts. Recognize it so reweight doesn't fail validation.
+                      # stub defined in some custom_fcts files (e.g. of samples to be
+                      # reweighted); listed so that it does not raise InvalidRunCard
                       "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
@@ -5827,9 +5827,8 @@ class RunCardNLO(RunCard):
     dummy_fct_file = {"dummy_cuts": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
-                      # dummy_bias_fct: legacy no-op stub name some user-generated LHE banners
-                      # carry via custom_fcts (e.g. grid-generated LHEs). Recognized so reweight
-                      # doesn't fail when run against an LHE whose run_card has it.
+                      # stub defined in some custom_fcts files (e.g. of samples to be
+                      # reweighted); listed so that it does not raise InvalidRunCard
                       "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
