@@ -50,8 +50,6 @@ external GET_QCD_LO2
 
 LOGICAL CALCULATEDBORN
 COMMON/CCALCULATEDBORN/CALCULATEDBORN
-INTEGER DENSITY_DBG
-COMMON /DENSITY_DBG/ DENSITY_DBG
 
 integer ewsud_helselect
 common/to_ewsud_helselect/ewsud_helselect
@@ -91,10 +89,6 @@ data firsttime /.true./
 integer hel_min, hel_max, hel_pick
 double precision volh
 
-C For per-helicity debug output (to compare with density path)
-double complex lsc_prev, ssc_prev, xxc_prev, par_prev
-double complex lsc_this, ssc_this, xxc_this, par_this
-
 include 'ewsudakov_haslo.inc'
 
 
@@ -109,59 +103,6 @@ AMP_BORN_SUMHEL = 0d0
 
 
 %(iflist)s
-if (density_dbg.ne.0) then
-  if (ewsud_nres.gt.0) then
-C   Resonance-helicity mode: summing over spectators
-    write(*,*)
-    write(*,*) '+============================================================+'
-    write(*,*) '|    SCALAR SUDAKOV WRAPPER (RESONANCE-HEL MODE)             |'
-    write(*,*) '+============================================================+'
-    write(*,'(A,I2)') '  nres = ', ewsud_nres
-    write(*,'(A)',advance='no') '  res_pos = ['
-    do ires=1,ewsud_nres
-      write(*,'(I3)',advance='no') ewsud_res_pos(ires)
-    enddo
-    write(*,'(A)') ' ]'
-    write(*,'(A)',advance='no') '  res_hel = ['
-    do ires=1,ewsud_nres
-      write(*,'(I3)',advance='no') ewsud_res_hel(ires)
-    enddo
-    write(*,'(A)') ' ]'
-    write(*,*) '  Summing over spectator helicities...'
-    write(*,*) '------------------------------------------------------------'
-  else if (ewsud_helselect.eq.0) then
-C   Full banner for standalone calls
-    write(*,*)
-    write(*,*) '+============================================================+'
-    write(*,*) '|           SCALAR SUDAKOV WRAPPER                           |'
-    write(*,*) '+============================================================+'
-    write(*,*)
-    write(*,*) '  NOTE: Scalar path gives Born-WEIGHTED Sudakov corrections!'
-    write(*,*) '        LSC,SSC,XXC,PAR here = Born * delta_kernel'
-    write(*,*) '        Divide by Born to compare with density path kernels.'
-    write(*,*)
-    write(*,'(A)',advance='no') '  Particle types (in=-1, out=+1): '
-    do i=1,nexternal-1
-      write(*,'(I4)',advance='no') iflist(i)
-    enddo
-    write(*,*)
-    write(*,'(A,L2,A,I3,A,L2)') '  MC hel=', sud_mc_hel,
-     $   '  helselect=', ewsud_helselect, '  filter=', sud_filter_hel
-    write(*,*)
-    write(*,*) '------------------------------------------------------------'
-    write(*,*) '  HELICITY LOOP'
-    write(*,*) '------------------------------------------------------------'
-  else
-C   Indented header for nested calls (from density wrapper)
-    write(*,'(A,I2,A)') '      +======== SCALAR WRAPPER [h=',
-     $    ewsud_helselect, '] (called from DENSITY WRAPPER) ========+'
-    write(*,'(A)',advance='no') '        nhel = ['
-    do i=1,nexternal-1
-      write(*,'(I3)',advance='no') nhel(i,ewsud_helselect)
-    enddo
-    write(*,'(A)') ' ]'
-  endif
-endif
 
 call sdk_get_invariants(p, iflist, invariants)
 
@@ -204,32 +145,6 @@ call sborn_onehel(p,nhel(1,ihel),ihel,ans_summed)
 amp_split_born_onehel(:) = amp_split_ewsud(:)
 AMP_BORN_SUMHEL = AMP_BORN_SUMHEL + dble(amp_split_born_onehel(1))
 
-C Print helicity header with Born value
-if (density_dbg.ne.0) then
-C   Only print if Born is non-zero (interesting helicity)
-  if (dble(amp_split_born_onehel(1)).gt.1d-30) then
-    if (ewsud_helselect.eq.0) then
-C     Full header for standalone calls
-      write(*,*)
-      write(*,'(A,I2,A)') '  +--- HELICITY ', ihel, ' (NON-ZERO) ---+'
-      write(*,'(A)',advance='no') '  |  nhel = ['
-      do i=1,nexternal-1
-        write(*,'(I3)',advance='no') nhel(i,ihel)
-      enddo
-      write(*,'(A)') ' ]'
-      write(*,'(A,ES12.4,A,ES12.4)') '  |  Born |M|^2 = ',
-     $    dble(amp_split_born_onehel(1)), ' + i*', aimag(amp_split_born_onehel(1))
-    else
-C     Indented Born value for nested calls (helicity config in header)
-      write(*,'(A,ES12.4,A,ES12.4)') '        Born |M|^2 = ',
-     $    dble(amp_split_born_onehel(1)), ' + i*', aimag(amp_split_born_onehel(1))
-    endif
-  else if (ewsud_helselect.ne.0) then
-C   For nested calls with zero Born, still print a note
-    write(*,'(A)') '        Born |M|^2 = 0 (helicity skipped)'
-  endif
-endif
-
 if (firsttime_hel(ihel)) then
     good_hel(ihel) = .false.
     do iamp = 1, amp_split_size
@@ -245,81 +160,8 @@ if (firsttime_hel(ihel)) then
     firsttime_hel(ihel) = .false.
 endif
 
-C Snapshot accumulated components for the helicity comparison
-lsc_prev = amp_split_ewsud_lsc(1)
-ssc_prev = amp_split_ewsud_ssc(1)
-xxc_prev = amp_split_ewsud_xxc(1)
-par_prev = amp_split_ewsud_par(1)
-
 C call the amplitudes with the goldstones for the longitudinally-polarised legs and the born for all-transverse
 %(calls_to_me)s
-
-C Compute per-helicity increment (for comparison with density path)
-lsc_this = amp_split_ewsud_lsc(1) - lsc_prev
-ssc_this = amp_split_ewsud_ssc(1) - ssc_prev
-xxc_this = amp_split_ewsud_xxc(1) - xxc_prev
-par_this = amp_split_ewsud_par(1) - par_prev
-
-if (density_dbg.ne.0) then
-  if (dble(amp_split_born_onehel(1)).gt.1d-30) then
-C   Full verbose output for standalone calls
-    if (ewsud_helselect.eq.0) then
-      write(*,'(A)') '  |'
-      write(*,'(A)') '  |  THIS helicity Born-weighted Sudakov:'
-      write(*,'(A,ES11.3,A,ES11.3)') '  |  LSC = ',
-     $    dble(lsc_this), ' + i*', aimag(lsc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '  |  SSC = ',
-     $    dble(ssc_this), ' + i*', aimag(ssc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '  |  XXC = ',
-     $    dble(xxc_this), ' + i*', aimag(xxc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '  |  PAR = ',
-     $    dble(par_this), ' + i*', aimag(par_this)
-      write(*,'(A)') '  |'
-      write(*,'(A)') '  |  Per-helicity delta (divide by Born):'
-      write(*,'(A,ES11.3,A,ES11.3)') '  |    LSC/Born = ',
-     $    dble(lsc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(lsc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '  |    SSC/Born = ',
-     $    dble(ssc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(ssc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '  |    XXC/Born = ',
-     $    dble(xxc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(xxc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '  |    PAR/Born = ',
-     $    dble(par_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(par_this)/dble(amp_split_born_onehel(1))
-      write(*,*) '  +-------------------------------+'
-    else
-C   Verbose indented output for nested (per-helicity) calls from density wrapper
-      write(*,'(A)') '        |'
-      write(*,'(A)') '        |  THIS helicity Born-weighted Sudakov:'
-      write(*,'(A,ES11.3,A,ES11.3)') '        |  LSC = ',
-     $    dble(lsc_this), ' + i*', aimag(lsc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '        |  SSC = ',
-     $    dble(ssc_this), ' + i*', aimag(ssc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '        |  XXC = ',
-     $    dble(xxc_this), ' + i*', aimag(xxc_this)
-      write(*,'(A,ES11.3,A,ES11.3)') '        |  PAR = ',
-     $    dble(par_this), ' + i*', aimag(par_this)
-      write(*,'(A)') '        |'
-      write(*,'(A)') '        |  Per-helicity delta (divide by Born):'
-      write(*,'(A,ES11.3,A,ES11.3)') '        |    LSC/Born = ',
-     $    dble(lsc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(lsc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '        |    SSC/Born = ',
-     $    dble(ssc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(ssc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '        |    XXC/Born = ',
-     $    dble(xxc_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(xxc_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,ES11.3,A,ES11.3)') '        |    PAR/Born = ',
-     $    dble(par_this)/dble(amp_split_born_onehel(1)),
-     $    ' + i*', aimag(par_this)/dble(amp_split_born_onehel(1))
-      write(*,'(A,I2,A)') '        +-- END [h=',ewsud_helselect,'] --+'
-    endif
-C   Skip zero-Born helicities silently for nested calls (too noisy)
-  endif
-endif
 enddo
 
 AMP_SPLIT_EWSUD_LSC(:) = AMP_SPLIT_EWSUD_LSC(:)/volh
@@ -330,25 +172,6 @@ AMP_SPLIT_EWSUD_PAR(:) = AMP_SPLIT_EWSUD_PAR(:)/volh
 AMP_SPLIT_EWSUD_QCD(:) = AMP_SPLIT_EWSUD_QCD(:)/VOLH
 AMP_SPLIT_EWSUD_PARQCD(:) = AMP_SPLIT_EWSUD_PAR(:)
 AMP_BORN_SUMHEL = AMP_BORN_SUMHEL / volh
-C Only print summary for standalone calls
-if (density_dbg.ne.0.and.ewsud_helselect.eq.0) then
-  write(*,*)
-  write(*,*) '------------------------------------------------------------'
-  write(*,*) '  SCALAR SUDAKOV SUMMARY (after volh normalization)'
-  write(*,*) '------------------------------------------------------------'
-  write(*,'(A,F8.4)') '  volh = ', volh
-  write(*,*)
-  write(*,'(A)') '  TOTAL Sudakov contributions (summed over helicities):'
-  write(*,'(A,ES12.4,A,ES12.4)') '    LSC = ', dble(amp_split_ewsud_lsc(1)),
-     $   ' + i*', aimag(amp_split_ewsud_lsc(1))
-  write(*,'(A,ES12.4,A,ES12.4)') '    SSC = ', dble(amp_split_ewsud_ssc(1)),
-     $   ' + i*', aimag(amp_split_ewsud_ssc(1))
-  write(*,'(A,ES12.4,A,ES12.4)') '    XXC = ', dble(amp_split_ewsud_xxc(1)),
-     $   ' + i*', aimag(amp_split_ewsud_xxc(1))
-  write(*,'(A,ES12.4,A,ES12.4)') '    PAR = ', dble(amp_split_ewsud_par(1)),
-     $   ' + i*', aimag(amp_split_ewsud_par(1))
-  write(*,*)
-endif
 
 DO IAMP = 1, AMP_SPLIT_SIZE
 
@@ -370,13 +193,6 @@ ENDDO
 
 CALCULATEDBORN=.FALSE.
 
-C Only print END banner for standalone calls
-if (density_dbg.ne.0.and.ewsud_helselect.eq.0) then
-  write(*,*) '============================================================'
-  write(*,*) '  END SCALAR SUDAKOV WRAPPER'
-  write(*,*) '============================================================'
-  write(*,*)
-endif
 return
 end
 

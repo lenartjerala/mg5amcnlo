@@ -233,9 +233,6 @@ C     Local variables
 C     Debug flag that must be 0 for Sudakov functions to return non-zero
       integer deb_settozero
       common /to_deb_settozero/deb_settozero
-      integer density_dbg
-      common /density_dbg/ density_dbg
-      data density_dbg /0/
 
 C     Helselect mechanism (density wrapper uses this per-helicity)
       integer ewsud_helselect
@@ -248,7 +245,7 @@ C-----
 C  BEGIN CODE
 C-----
 
-C     Validate nres before any diagnostic or computational loop indexes the
+C     Validate nres before any loop indexes the
 C     fixed-size resonance arrays.
       if (nres.lt.0 .or. nres.gt.MAX_RES) then
         write (*,*) 'ERROR in density_sudakov_py: nres=', nres
@@ -258,23 +255,6 @@ C     fixed-size resonance arrays.
 
 C     Initialize debug flag (CRITICAL: uninitialized causes Sudakov=0)
       deb_settozero = 0
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '+============================================================+'
-        write(*,*) '|         DENSITY SUDAKOV - F2PY ENTRY POINT                 |'
-        write(*,*) '+============================================================+'
-        write(*,*)
-        write(*,'(A,I2)') '  Number of resonances: ', nres
-        if (nres .gt. 0) then
-          do i = 1, nres
-            write(*,'(A,I1,A,I2,A,I1,A)') '    Resonance ', i,
-     $        ': particle #', res_indices(i),
-     $        ' with ', res_dims(i), ' spin states'
-          enddo
-        endif
-        write(*,'(A,F10.6)') '  Strong coupling (g): ', gstr_in
-        write(*,*)
-      endif
 
       nfksprocess = 1
       sud_mc_hel = .false.
@@ -325,9 +305,6 @@ C     Just compute Born for normalization check (Sudakov done in density wrapper
       call sborn(p_born, born)
       wgt_born = amp_split(1)
       results(1) = wgt_born
-      if (density_dbg .ne. 0) then
-        write(*,'(A,ES14.6)') '  Born (IDEN-averaged): ', wgt_born
-      endif
 
 C     Compute density matrix B[h,h'] and Sudakov corrections delta[h]
 C     Phase 1: JAMP + color contraction -> B[h,h']
@@ -341,10 +318,6 @@ C     Initialize helselect and disable filtering for density computation
 
 C     CENTRAL: s_to_rij = .true. (with higher-order s->rij corrections)
       s_to_rij = .true.
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '  === CENTRAL (s_to_rij=TRUE) ==='
-      endif
       call density_matrix_wrapper(p_born, nres, res_indices, res_dims,
      $       density_born, density_delta, born_diag)
       results(2) = 0d0
@@ -352,23 +325,11 @@ C     CENTRAL: s_to_rij = .true. (with higher-order s->rij corrections)
 C     VARIATION: s_to_rij = .false. (without higher-order corrections)
 C     Recompute only the delta, reusing density_born structure
       s_to_rij = .false.
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '  === VARIATION (s_to_rij=FALSE) ==='
-      endif
 C     Call wrapper again with variation setting, store in density_delta_var
 C     Note: density_born and born_diag are recomputed but should be identical
       call density_matrix_wrapper(p_born, nres, res_indices, res_dims,
      $       density_born, density_delta_var, born_diag)
       results(3) = 0d0
-
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '============================================================'
-        write(*,*) '  END DENSITY SUDAKOV F2PY'
-        write(*,*) '============================================================'
-        write(*,*)
-      endif
 
       return
       end

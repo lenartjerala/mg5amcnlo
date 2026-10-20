@@ -3,11 +3,6 @@
        implicit none
        include 'orders.inc'
        integer lo2_orders(nsplitorders)
-       integer density_dbg
-       common /density_dbg/ density_dbg
-       if (density_dbg .ne. 0) then
-         write(*,*) '[DENSITY_FORTRAN] get_lo2_orders: enter'
-       endif
 
        ! copy the born orders into the lo2 orders
        ! This assumes that there is only one contribution
@@ -17,9 +12,6 @@
        ! now get the orders for LO2
        lo2_orders(qcd_pos) = lo2_orders(qcd_pos) - 2
        lo2_orders(qed_pos) = lo2_orders(qed_pos) + 2
-       if (density_dbg .ne. 0) then
-         write(*,*) '[DENSITY_FORTRAN] get_lo2_orders: exit lo2_orders=', lo2_orders
-       endif
        return
        end
 
@@ -37,19 +29,10 @@
       double precision inv_raw
       integer sign_ij
       logical clamped
-      integer density_dbg
-      common /density_dbg/ density_dbg
 
       logical rij_ge_mw
       COMMON /rij_ge_mw/ rij_ge_mw
 
-      if (density_dbg .ne. 0) then
-        write(*,*) '[DENSITY_FORTRAN] sdk_get_invariants: enter'
-        write(*,*) '[DENSITY_FORTRAN]   iflist=', iflist
-        write(*,*) '[DENSITY_FORTRAN]   rij_ge_mw=', rij_ge_mw
-        write(*,*) '[DENSITY_FORTRAN]   inv_ij = sumdot(p_i,p_j,sign)'
-        write(*,*) '[DENSITY_FORTRAN]   clamp: if |inv_ij| < MW^2 then set to sign*MW^2'
-      endif
 
       do i = 1, nexternal-1
         do j = i, nexternal-1
@@ -62,16 +45,8 @@
             invariants(i,j) = inv_raw
           endif
           invariants(j,i) = invariants(i,j)
-          if (density_dbg .ne. 0) then
-            write(*,*) '[DENSITY_FORTRAN]   inv(', i, ',', j, ')=',
-     $        invariants(i,j), ' raw=', inv_raw,
-     $        ' sign=', sign_ij, ' clamped=', clamped
-          endif
         enddo
       enddo
-      if (density_dbg .ne. 0) then
-        write(*,*) '[DENSITY_FORTRAN] sdk_get_invariants: exit'
-      endif
 
       return
       end

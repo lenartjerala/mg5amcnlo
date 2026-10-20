@@ -90,8 +90,6 @@ C     Filter helicities flag
 
       LOGICAL CALCULATEDBORN
       COMMON/CCALCULATEDBORN/CALCULATEDBORN
-      INTEGER DENSITY_DBG
-      COMMON /DENSITY_DBG/ DENSITY_DBG
 
 
 C --------------------------------------------------------------------------
@@ -103,24 +101,6 @@ C     Compute total dimension D = product of res_dims
       do i = 1, nres
         total_dim = total_dim * res_dims(i)
       enddo
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '+============================================================+'
-        write(*,*) '|  DENSITY MATRIX WRAPPER (DELTA-ONLY MODE)                  |'
-        write(*,*) '+============================================================+'
-        write(*,*)
-        write(*,*) '  Python computes B[h,h''] via DensityHelper'
-        write(*,*) '  Fortran computes delta (per-helicity Sudakov)'
-        write(*,*)
-        write(*,'(A,I2,A)') '  Number of resonances: ', nres, ''
-        do i = 1, nres
-          write(*,'(A,I1,A,I2,A,I1,A)') '    Resonance ', i,
-     $        ': particle #', res_indices(i),
-     $        ' with ', res_dims(i), ' spin states'
-        enddo
-        write(*,'(A,I3)') '  Total helicity dimension (n_comb): ', total_dim
-        write(*,*)
-      endif
 
 C     Initialize outputs
 C     density_born and born_diag return zeros - Python computes B via DensityHelper
@@ -138,11 +118,6 @@ C ==========================================================================
 C     ALLOW_HEL layout: for each combination ih=1..total_dim,
 C       ALLOW_HEL((ih-1)*nres+1 : ih*nres) = helicity values for resonances
 C ==========================================================================
-      if (density_dbg .ne. 0) then
-        write(*,*) '------------------------------------------------------------'
-        write(*,*) '  Building ALLOW_HEL array for resonance-helicity selection'
-        write(*,*) '------------------------------------------------------------'
-      endif
 
       do ih = 1, total_dim
 C       Convert 1-based ih to 0-based flat index, then to individual indices
@@ -170,15 +145,6 @@ C       Store in ALLOW_HEL
         do n = 1, nres
           allow_hel((ih-1)*nres + n) = hel_values(n)
         enddo
-
-        if (density_dbg .ne. 0) then
-          write(*,'(A,I3,A)', advance='no') '    ih=', ih, ' hels=('
-          do n = 1, nres
-            write(*,'(I2)', advance='no') hel_values(n)
-            if (n .lt. nres) write(*,'(A)', advance='no') ','
-          enddo
-          write(*,'(A)') ')'
-        endif
       enddo
 
 C ==========================================================================
@@ -193,13 +159,6 @@ C ==========================================================================
 C     PHASE 2: Per-resonance-helicity Sudakov corrections
 C     Use resonance-helicity selection (ewsud_nres) to sum over spectators
 C ==========================================================================
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '------------------------------------------------------------'
-        write(*,*) '  PHASE 2: PER-RESONANCE-HELICITY SUDAKOV'
-        write(*,*) '           (using ewsud_nres spectator summation)'
-        write(*,*) '------------------------------------------------------------'
-      endif
 
 C     Save and disable helicity filtering for density calls
       saved_filter_hel = sud_filter_hel
@@ -246,17 +205,6 @@ C       Python will normalize: delta[h] = density_delta[h] / born_diag[h]
 C       Per-helicity Born (summed over spectators, /IDEN).
 C       IDEN cancels in delta/born ratio, so no Python IDEN needed.
         born_diag(ih) = amp_born_sumhel
-
-        if (density_dbg .ne. 0) then
-          write(*,'(A,I3,A)', advance='no') '  ih=', ih, '  res_hel=('
-          do n = 1, nres
-            write(*,'(I2)', advance='no') ewsud_res_hel(n)
-            if (n .lt. nres) write(*,'(A)', advance='no') ','
-          enddo
-          write(*,'(A,ES12.4,A,ES12.4)')
-     $        ')  delta*B=', dble(delta_total_this_hel),
-     $        ' + i*', aimag(delta_total_this_hel)
-        endif
       enddo
 
 C     Reset resonance-helicity selection
@@ -278,33 +226,6 @@ C     delta[h] is returned unnormalized (= delta*B[h]).
 C     Python will compute: delta[h] = delta*B[h] / born_diag[h]
 C     where born_diag[h] is returned alongside delta (IDEN cancels).
 C ==========================================================================
-
-      if (density_dbg .ne. 0) then
-        write(*,*)
-        write(*,*) '------------------------------------------------------------'
-        write(*,*) '  DENSITY MATRIX WRAPPER COMPLETE'
-        write(*,*) '------------------------------------------------------------'
-        write(*,*)
-        write(*,'(A)') '  Returning unnormalized delta*B values:'
-        write(*,'(A)') '  +--------+-------------------------------+'
-        write(*,'(A)') '  |   h    |      delta*B (unnormalized)   |'
-        write(*,'(A)') '  +--------+-------------------------------+'
-        do ih = 1, total_dim
-          write(*,'(A,I3,A,ES12.4,A,ES12.4,A)')
-     $      '  | ', ih-1, '    | ',
-     $      dble(density_delta(ih)), ' + i*', aimag(density_delta(ih)),
-     $      ' |'
-        enddo
-        write(*,'(A)') '  +--------+-------------------------------+'
-        write(*,*)
-        write(*,*) '  Python will normalize: delta[h] = delta*B[h] / born_diag[h]'
-        write(*,*) '  where born_diag[h] is returned alongside delta (IDEN cancels)'
-        write(*,*)
-        write(*,*) '============================================================'
-        write(*,*) '  END DENSITY MATRIX WRAPPER (DELTA-ONLY)'
-        write(*,*) '============================================================'
-        write(*,*)
-      endif
 
       return
       end
