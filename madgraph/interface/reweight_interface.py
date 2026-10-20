@@ -122,7 +122,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         self.use_eventid = False
         self.inc_sudakov = False
         # ξ-scan for EW Sudakov clustering threshold (s_ij > ξ·M_W²).
-        # None → legacy single-ξ behavior (defaults to mW2_cluster_scale=1.5).
+        # None → single-ξ behavior (defaults to mW2_cluster_scale=1.5).
         # List of floats → produce one weight pair (central, s_to_rij-var) per ξ.
         self.sudakov_xi_scan = None
         self._sudakov_xi_list = None      # finalized list used at launch time
@@ -637,7 +637,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
         fxfx_ewsudakov.CURRENT_EVENT_ID = 0
         fxfx_ewsudakov.fks_reset_accounting()
         for event_nb,event in enumerate(self.lhe_input):
-            # Set current event ID for debug printouts (1-based to match user expectations)
+            # Set the current event ID (1-based) for the per-event FKS accounting
             fxfx_ewsudakov.CURRENT_EVENT_ID = event_nb + 1
             #control logger
             if (event_nb % max(int(10**int(math.log10(float(event_nb)+1))),10)==0):
@@ -2551,24 +2551,18 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
 
     def load_density_modules(self):
         """Load density matrix modules from the dedicated density directories."""
-        fxfx_ewsudakov._dbg('load_density_modules called, inc_sudakov=%s', self.inc_sudakov)
         if not self.inc_sudakov:
             return
         self.density_prod_id_to_path = {}
         self.density_decay_id_to_path = {}
         self.density_prod_f2pylib = {}
         self.density_decay_f2pylib = {}
-        fxfx_ewsudakov._dbg('Loading PRODUCTION density modules...')
         self._load_density_dir(self.density_prod_dirname, nincoming=2,
                                id_to_path=self.density_prod_id_to_path,
                                f2pylib=self.density_prod_f2pylib)
-        fxfx_ewsudakov._dbg('Loading DECAY density modules...')
         self._load_density_dir(self.density_decay_dirname, nincoming=1,
                                id_to_path=self.density_decay_id_to_path,
                                f2pylib=self.density_decay_f2pylib)
-        # Summary
-        fxfx_ewsudakov._dbg('Density modules loaded: prod=%d, decay=%d',
-                           len(self.density_prod_id_to_path), len(self.density_decay_id_to_path))
 
     def _load_density_dir(self, dir_name, nincoming, id_to_path, f2pylib):
         """Load a standalone density directory and populate mappings."""
@@ -2599,9 +2593,7 @@ class ReweightInterface(FxFxEWSudakovMixin, extended_cmd.Cmd):
                     import importlib
                     mymod = importlib.import_module(mod_name)
                     mymod = importlib.reload(mymod)
-                except Exception as e:
-                    import traceback
-                    fxfx_ewsudakov._dbg('Import FAILED for %s: %s', mod_name, e)
+                except Exception:
                     continue
             f2pylib[(dir_name, tag)] = mymod
             if hasattr(mymod, 'set_madloop_path'):

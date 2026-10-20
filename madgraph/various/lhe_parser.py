@@ -2912,12 +2912,11 @@ class Event(list):
         CM energy - never zero for a physical event, invariant under spatial
         rotations performed before this check.
         """
-        eps_abs = 1.0e-3      # GeV (1 MeV).  Re-tightened 2026-05-22 after
-                              # the root-cause clamp-removal in zboost/zboost_inv/
-                              # pt_boost: actual post-cluster residue is now at
-                              # machine epsilon (~1e-12 GeV), so 1 MeV gives 9
-                              # orders of safety margin while still catching any
-                              # real momentum-conservation violation.
+        eps_abs = 1.0e-3      # GeV (1 MeV).  With unclamped zboost/zboost_inv/
+                              # pt_boost the post-cluster residue is at machine
+                              # epsilon (~1e-12 GeV), so 1 MeV gives 9 orders
+                              # of safety margin while still catching any real
+                              # momentum-conservation violation.
         eps_rel = 1.0e-6      # 1 ppm against E_scale=Sum|E_initial|.
 
         P  = [0.0, 0.0, 0.0, 0.0]   # signed sum (E, px, py, pz)
@@ -4408,12 +4407,12 @@ class FourMomentum(object):
                             self.px,
                             self.py,
                             gamma*self.pz - gammabeta*self.E])
-        # Removed 2026-05-22: per-particle |out.pz| < 1e-6 * out.E clamp.
-        # When applied to particles other than the boost's own pboost (as
-        # done in _fks_isr_mapping / _fks_fsr_mapping), the clamp deletes
-        # sub-threshold momentum components that algebraically compensate
-        # other particles' boosted momenta, generating MeV-scale residue
-        # for TeV-scale particles. Restoring Lorentz linearity.
+        # No per-particle |out.pz| < 1e-6 * out.E clamp: applied to particles
+        # other than the boost's own pboost (as in _fks_isr_mapping /
+        # _fks_fsr_mapping), such a clamp would delete sub-threshold momentum
+        # components that algebraically compensate other particles' boosted
+        # momenta, generating MeV-scale residue for TeV-scale particles. The
+        # boost stays Lorentz-linear.
         return out
 
     def zboost_inv(self, pboost=None, E=0, pz=0):
@@ -4433,7 +4432,7 @@ class FourMomentum(object):
                             self.px,
                             self.py,
                             gamma*self.pz + gammabeta*self.E])
-        # Removed 2026-05-22: see zboost above. Same Lorentz-linearity argument.
+        # No small-component clamp, as in zboost (Lorentz linearity).
         return out
 
 
@@ -4458,13 +4457,11 @@ class FourMomentum(object):
                             -gamma*betax*self.E + (1.0 + (gamma-1.0)*betax**2/(beta**2))*self.px + (gamma-1.0)*betax*betay/(beta**2)*self.py,
                             -gamma*betay*self.E + ((gamma-1.0)*betax*betay/(beta**2))*self.px + (1.0+(gamma-1.0)*(betay**2)/(beta**2))*self.py,
                             self.pz])
-        # Removed 2026-05-22: per-particle |out.{px,py}| < 1e-6 * out.E clamps.
-        # In _fks_isr_mapping (fxfx_ewsudakov.py:701) pt_boost is applied to
-        # every particle in orig_momenta with the same pboost, so the clamp
-        # threshold of 1e-6*E_particle (~MeV for TeV particles) deletes
-        # sub-threshold compensating components and leaves a structured MeV
-        # residue at check_kinematics_only. Verified clamp-on=1.23 MeV vs
-        # clamp-off=4.6e-12 GeV on chunk_023 event 36128 (Z+3-parton).
+        # No per-particle |out.{px,py}| < 1e-6 * out.E clamps: _fks_isr_mapping
+        # applies pt_boost to every particle in orig_momenta with the same
+        # pboost, and a clamp threshold of 1e-6*E_particle (~MeV for TeV
+        # particles) would delete sub-threshold compensating components and
+        # leave a structured MeV residue at check_kinematics_only.
         return out
 
     def boost_beta(self,beta,mom):

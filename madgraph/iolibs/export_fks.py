@@ -3064,8 +3064,8 @@ Parameters              %(params)s\n\
         The B matrix is computed by Python's DensityHelper using Valentin's
         GET_DENSITY from the standalone rw_me_density_prod modules.
         """
-        # Template no longer uses substitution variables (Phase 1 and 3 removed)
-        # but we keep the dict for backward compatibility
+        # The template has no substitution variables; the empty dict keeps
+        # the same %-formatting pass as the other template writers.
         replace_dict = {}
 
         file = open(os.path.join(_file_path,
@@ -3253,11 +3253,9 @@ Parameters              %(params)s\n\
         # Extract color data lines
         color_data_lines = self.get_color_data_lines(matrix_element)
         # get_color_data_lines emits "%(proc_prefix)s" placeholders meant for a
-        # second substitution pass; every other Sudakov-ME writer applies it
-        # (write_sudakov_me:~3534 and ~2059/2692/2793). The goldstone writer was
-        # missing it, so raw %(proc_prefix)s leaked into ewsudakov_goldstone_me_*.f
-        # -> "Syntax error in DATA statement" for the first process that produces
-        # a Goldstone ME (e.g. charged WW). Match the siblings.
+        # second substitution pass, applied here as in the other Sudakov-ME
+        # writers; an unsubstituted placeholder is a Fortran DATA syntax error
+        # in ewsudakov_goldstone_me_*.f (e.g. charged WW).
         replace_dict['color_data_lines'] = "\n".join(color_data_lines) % {'proc_prefix': ''}
 
         # Extract helas calls of the base  matrix element

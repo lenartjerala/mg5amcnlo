@@ -53,10 +53,8 @@ class MissingSudakovProcessError(Exception):
     """The compiled Sudakov library does not contain a required process."""
 
 # =============================================================================
-# Module-level debug flag and function
+# Module-level state
 # =============================================================================
-DEBUG = False
-
 # Event counter set by reweight_interface.py during event loop (1-based)
 CURRENT_EVENT_ID = 0
 
@@ -72,7 +70,6 @@ def limit_sudakov_factors(factors, accounting_key=None):
     """Set all factors to unity when the central factor exceeds 200 in magnitude."""
     factors = list(factors)
     if abs(factors[0]) > 200:
-        _dbg(f"Neutralizing all Sudakov factors: |central|={abs(factors[0]):g} exceeds 200")
         if accounting_key is not None:
             _count_fks_event(accounting_key)
         return [1.0] * len(factors)
@@ -161,12 +158,6 @@ def fks_accounting_summary():
     for name, count in sorted(FKS_QUALITY_COUNTS.items()):
         lines.append("    %-42s %d" % (name, count))
     return "\n".join(lines)
-
-
-def _dbg(*args, **kwargs):
-    """Debug output controlled by DEBUG flag."""
-    if DEBUG:
-        print("[DEBUG]", *args, flush=True, **kwargs)
 
 
 # =============================================================================
@@ -370,9 +361,6 @@ def _fix_mother_sign_global(model, buff_event, pos_i, pos_j, mother_pdg, tol=1e-
                 model, buff_event, keep_pos, drop_pos, cand_pdg
             )
             if abs(q_init_cand - q_final_cand) < tol:
-                _dbg(
-                    f"FxFx clustering: fixed mother flavor {mother_pdg} -> {cand_pdg} for positions {pos_i+1},{pos_j+1}"
-                )
                 return cand_pdg, True
 
     msg = (
@@ -469,10 +457,6 @@ def suggest_mothers_from_interactions(model, perts, child_i, child_j, emitter_st
 # =============================================================================
 # FxFx Clustering Kinematics (FKS reshuffling)
 # =============================================================================
-
-
-# Debug flag for verbose clustering output
-_cluster_dbg = _dbg  # Alias for clustering debug output
 
 
 def _m2(p):
@@ -637,17 +621,8 @@ def _transform_decay_products_to_onshell(
     onshell_m = math.sqrt(max(0, onshell_m2))
     onshell_p = math.sqrt(onshell_res_p4.px**2 + onshell_res_p4.py**2 + onshell_res_p4.pz**2)
 
-    if DEBUG:
-        _cluster_dbg("=" * 60)
-        _cluster_dbg("  [C MATRIX ON-SHELL TRANSFORMATION]")
-        _cluster_dbg("=" * 60)
-        _cluster_dbg(f"  Original: p4=({original_res_p4.E:.4f}, {original_res_p4.px:.4f}, {original_res_p4.py:.4f}, {original_res_p4.pz:.4f}), m={orig_m:.4f}")
-        _cluster_dbg(f"  On-shell: p4=({onshell_res_p4.E:.4f}, {onshell_res_p4.px:.4f}, {onshell_res_p4.py:.4f}, {onshell_res_p4.pz:.4f}), m={onshell_m:.4f}")
-        _cluster_dbg(f"  Mass shift: {onshell_m - orig_m:+.4f} GeV (pole - invariant)")
-
     # Edge case: original resonance at rest or very low momentum
     if orig_p < 1e-10 and orig_m < 1e-10:
-        _cluster_dbg("  [decay_transform] WARNING: degenerate original resonance, returning unchanged")
         return [FourMomentum(p) for p in decay_momenta]
 
     # Boost parameters for original resonance (boost TO rest frame)
@@ -672,8 +647,6 @@ def _transform_decay_products_to_onshell(
         p_rest = _boost_along_direction(p, orig_beta, orig_dir)
         rest_momenta.append(p_rest)
 
-    _cluster_dbg(f"  [decay_transform] Boosted {len(rest_momenta)} particles to rest frame")
-
     # In rest frame, get directions and masses of decay products
     rest_directions = []
     rest_masses = []
@@ -687,8 +660,6 @@ def _transform_decay_products_to_onshell(
         else:
             direction = (0, 0, 1)
         rest_directions.append(direction)
-        if DEBUG:
-            _cluster_dbg(f"  [decay_transform] decay[{i}]: E_rest={p_rest.E:.4f}, |p|={p_mag:.4f}, m={m:.4f}")
 
     # Construct new momenta in on-shell rest frame
     # For 2-body decay: E1 + E2 = M, |p1| = |p2|
@@ -708,10 +679,6 @@ def _transform_decay_products_to_onshell(
         else:
             # Kinematically impossible: on-shell mass < sum of decay product masses.
             # Return original momenta to preserve momentum conservation.
-            _cluster_dbg(
-                f"  [decay_transform] WARNING: M_onshell={onshell_m:.4f} < m1+m2={m1+m2:.4f}, "
-                "returning original momenta"
-            )
             return [FourMomentum(p) for p in decay_momenta]
 
         E1_new = math.sqrt(p_new**2 + m1**2)
@@ -735,9 +702,6 @@ def _transform_decay_products_to_onshell(
                 ]
             ),
         ]
-        if DEBUG:
-            orig_p_mag = math.sqrt(rest_momenta[0].px**2 + rest_momenta[0].py**2 + rest_momenta[0].pz**2)
-            _cluster_dbg(f"  2-body rescaling: |p| {orig_p_mag:.4f} -> {p_new:.4f}, E1+E2={E1_new + E2_new:.4f} (M={onshell_m:.4f})")
     else:
         # Multi-body decay: scale momenta uniformly
         # This is an approximation that preserves angles but not exact phase space
@@ -749,7 +713,6 @@ def _transform_decay_products_to_onshell(
                 [p_rest.E * scale, p_rest.px * scale, p_rest.py * scale, p_rest.pz * scale]
             )
             new_rest_momenta.append(p_new)
-        _cluster_dbg(f"  [decay_transform] multi-body: scale={scale:.6f}")
 
     # Boost from on-shell rest frame to lab frame
     if onshell_p > 1e-10:
@@ -769,24 +732,6 @@ def _transform_decay_products_to_onshell(
         # This gives the particle momentum in the +n̂ direction (matching the resonance)
         p_lab = _boost_along_direction(p_rest, -onshell_beta, onshell_dir)
         lab_momenta.append(p_lab)
-
-    # Debug: verify momentum conservation
-    if DEBUG:
-        sum_p = FourMomentum()
-        for p in lab_momenta:
-            sum_p += p
-        delta_E = abs(onshell_res_p4.E - sum_p.E)
-        delta_px = abs(onshell_res_p4.px - sum_p.px)
-        delta_py = abs(onshell_res_p4.py - sum_p.py)
-        delta_pz = abs(onshell_res_p4.pz - sum_p.pz)
-        _cluster_dbg(f"  Boost to lab: β={onshell_beta:.6f}")
-        for i, p in enumerate(lab_momenta):
-            m = math.sqrt(max(0, _m2(p)))
-            _cluster_dbg(f"    [{i}] p4=({p.E:.4f}, {p.px:.4f}, {p.py:.4f}, {p.pz:.4f}), m={m:.4f}")
-        _cluster_dbg(
-            f"  Conservation: dE={delta_E:.2e}, dpx={delta_px:.2e}, dpy={delta_py:.2e}, dpz={delta_pz:.2e}"
-        )
-        _cluster_dbg("=" * 60)
 
     return lab_momenta
 
@@ -885,9 +830,6 @@ def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
     s_hat = _m2(p_clustered)
     sqrt_s = math.sqrt(max(0, s_hat))
 
-    if DEBUG:
-        _cluster_dbg(f"  ISR FKS: √ŝ'={sqrt_s:.4f}, E_rad={p_radiation.E:.4f}, pT_rad={math.sqrt(p_radiation.px**2+p_radiation.py**2):.4f}")
-
     # GUARD: Nearly light-like p_clustered has no rest frame — boost is numerically unstable.
     # Threshold 0.1 GeV: below this, γ > E/0.1 makes the CM rescaling unreliable.
     # Caller (_cluster_fxfx_event) catches this and sets stop_clustering=True.
@@ -949,18 +891,6 @@ def _fks_isr_mapping(fks_i, fks_j, moth, orig_momenta):
         beam0_new.zboost_inv(pboost=p_clustered_after_pt),
         beam1_new.zboost_inv(pboost=p_clustered_after_pt),
     ]
-
-    # Debug: verify momentum conservation
-    if DEBUG:
-        p_fs_total = FourMomentum()
-        for idx, p in result["final_state"].items():
-            p_fs_total += p
-        p_is_new = result["beams"][0] + result["beams"][1]
-        _cluster_dbg(
-            f"    ISR conservation: dE={abs(p_is_new.E - p_fs_total.E):.2e}, "
-            f"dpx={abs(p_is_new.px - p_fs_total.px):.2e}, dpy={abs(p_is_new.py - p_fs_total.py):.2e}, "
-            f"dpz={abs(p_is_new.pz - p_fs_total.pz):.2e}"
-        )
 
     return result
 
@@ -1040,14 +970,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         "spectator_transform": [],
     }
 
-    # Compute invariant mass of the clustering pair (before any reshuffling)
-    mother_naive = orig_momenta[fks_i] + orig_momenta[fks_j]
-    invariant_m2 = _m2(mother_naive)
-    invariant_m = math.sqrt(max(0, invariant_m2))
-
-    if DEBUG:
-        _cluster_dbg(f"  FKS FSR: pid={mother_pid}, M={mother_mass:.4f}, m_inv={invariant_m:.4f}, spectators={spectator_indices}")
-
     if len(spectator_indices) == 0:
         # NO SPECTATORS: k_rec = 0, mother = q (total initial state)
         # To put mother on pole mass M, we scale beam energies.
@@ -1096,10 +1018,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         result["mother"] = q_new
         result["method"] = "fks_fsr_no_spectators_beam_scaled"
 
-        if DEBUG:
-            mother_m_check = math.sqrt(max(0, _m2(q_new)))
-            _cluster_dbg(f"  No-spectator: scale={scale:.6f}, m_check={mother_m_check:.4f}, Δ={abs(mother_m_check - mother_mass):.2e}")
-
         return result
 
     # WITH SPECTATORS: Apply modified FKS mapping for massive mother
@@ -1111,8 +1029,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     k_rec_E = k_rec.E
     k_rec_p = math.sqrt(k_rec.px**2 + k_rec.py**2 + k_rec.pz**2)
     k_rec_m2 = _m2(k_rec)  # Invariant mass squared of recoil system
-
-    _cluster_dbg(f"  k_rec: E={k_rec_E:.4f}, |p|={k_rec_p:.4f}, m²={k_rec_m2:.4f}")
 
     if k_rec_p < 1e-10:
         # Spectators have zero total 3-momentum: no boost needed
@@ -1128,7 +1044,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         for idx in spectator_indices:
             result["spectators"][idx] = FourMomentum(orig_momenta[idx])
         result["method"] = "fks_fsr_zero_krec_momentum"
-        _cluster_dbg("  Zero k_rec momentum: no boost needed")
         return result
 
     # NOTE: We do NOT reject here even if naive_m² < M². With negative β,
@@ -1179,7 +1094,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         denom_qn = q.E - q_dot_n
 
         if abs(denom_qn) < 1e-10:
-            _cluster_dbg("  WARNING: Degenerate q_E - q·n̂ = 0")
             result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
             for idx in spectator_indices:
                 result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1187,10 +1101,8 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             return result
 
         k_bar_E_target = (q2 - M2) / (2.0 * denom_qn)
-        _cluster_dbg(f"  Massless spectator: k̄_E target = {k_bar_E_target:.4f}")
 
         if k_bar_E_target < 0:
-            _cluster_dbg("  WARNING: k̄_E < 0 not physical")
             result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
             for idx in spectator_indices:
                 result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1206,10 +1118,8 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         r = (q2 - M2) / (
             q_dot_k + math.sqrt(max(0.0, q_dot_k**2 - k_rec_m2 * (q2 - M2)))
         )
-        _cluster_dbg(f"  r = k̄_E/k_E = {r:.6f}")
 
         if r <= 0:
-            _cluster_dbg("  WARNING: r ≤ 0, no physical solution")
             result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
             for idx in spectator_indices:
                 result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1218,7 +1128,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
 
         r2 = r * r
         beta = (1.0 - r2) / (1.0 + r2)
-        _cluster_dbg(f"  β = (1-r²)/(1+r²) = {beta:.6f}")
 
         # Applied as the rescaling k̄ = r k, which keeps the mother on its pole
         # for r far from 1 (soft recoil), where 1 - β² cancels.
@@ -1234,8 +1143,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         # where p_n = k⃗·n̂ and k̄⃗ = k̄_n n̂ + k⃗_perp
         #
         # This leads to a quadratic in β. We'll solve numerically if needed.
-
-        _cluster_dbg(f"  Massive spectator (m²={k_rec_m2:.4f}), using general approach")
 
         # q·k̄ = q_E k̄_E - q⃗·k̄⃗
         #      = q_E γ(E - β p_n) - q_n γ(p_n - β E) - q⃗_perp·k⃗_perp
@@ -1262,8 +1169,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         B = q_dot_n * k_rec_E - q.E * p_n
         rhs = target + q_dot_k_perp
 
-        _cluster_dbg(f"  A={A:.4f}, B={B:.4f}, rhs={rhs:.4f}")
-
         # UNREACHABLE TARGET GUARD: the constraint is γ(A + βB) = rhs, and for
         # timelike q with a physical spectator system A ≥ |B|, so the left-hand
         # side is strictly positive for every |β| < 1. Moreover q·k̄ ≥ 0 for any
@@ -1274,10 +1179,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         # satisfy γ(A + βB) = -rhs (the spurious sign branch) and would silently
         # put the mother on a WRONG mass while reporting success.
         if rhs <= 0:
-            _cluster_dbg(
-                f"  WARNING: unreachable on-shell target (rhs={rhs:.4f} <= 0, "
-                f"q²+m²_rec={q2 + k_rec_m2:.2f} < M²={M2:.2f})"
-            )
             result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
             for idx in spectator_indices:
                 result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1287,15 +1188,11 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         # Check for numerical instability: B ≈ 0 means spectators nearly collinear with beam
         # In this limit, the quadratic becomes degenerate. Use simplified formula.
         if abs(B) < 1e-8 * max(abs(A), abs(rhs), 1.0):
-            _cluster_dbg(
-                "  WARNING: B ≈ 0 (spectators collinear with beam), using simplified formula"
-            )
             # When B → 0: γ A = rhs, so γ = rhs/A
             # γ² = rhs²/A² = 1/(1-β²)
             # 1 - β² = A²/rhs²
             # β² = 1 - A²/rhs²
             if abs(rhs) < 1e-10:
-                _cluster_dbg("  WARNING: rhs ≈ 0, degenerate case")
                 result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
                 for idx in spectator_indices:
                     result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1303,7 +1200,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
                 return result
             gamma_sq = (rhs / A) ** 2 if abs(A) > 1e-10 else float("inf")
             if gamma_sq < 1.0:
-                _cluster_dbg("  WARNING: γ² < 1, unphysical")
                 result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
                 for idx in spectator_indices:
                     result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1313,7 +1209,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             beta = math.sqrt(beta_sq) if beta_sq > 0 else 0.0
             # Sign of β: need γ(A + β B) = rhs, with B ≈ 0 this is γ A ≈ rhs
             # If A and rhs have same sign, β can be either; choose small |β|
-            _cluster_dbg(f"  Collinear limit: β = {beta:.6f}")
         else:
             # γ(A + β B) = rhs
             # (A + β B)² = rhs² (1 - β²)
@@ -1326,7 +1221,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
 
             disc = coef_b * coef_b - 4 * coef_a * coef_c
             if disc < 0:
-                _cluster_dbg("  WARNING: Negative discriminant")
                 result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
                 for idx in spectator_indices:
                     result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1336,12 +1230,10 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             sqrt_disc = math.sqrt(disc)
             beta1 = (-coef_b + sqrt_disc) / (2 * coef_a)
             beta2 = (-coef_b - sqrt_disc) / (2 * coef_a)
-            _cluster_dbg(f"  Two solutions: β₁={beta1:.6f}, β₂={beta2:.6f}")
 
             # Choose valid solution with |β| < 1
             valid_betas = [b for b in [beta1, beta2] if abs(b) < 1.0]
             if not valid_betas:
-                _cluster_dbg("  WARNING: No valid β with |β| < 1")
                 result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
                 for idx in spectator_indices:
                     result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1349,7 +1241,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
                 return result
 
             beta = min(valid_betas, key=abs)
-            _cluster_dbg(f"  Chosen β = {beta:.6f}")
 
             # Belt-and-suspenders: verify the chosen root solves the UNSQUARED
             # constraint γ(A + βB) = rhs (squaring admits the -rhs branch; with
@@ -1357,9 +1248,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             # violation here means a silently wrong mother mass downstream).
             _gamma_chk = 1.0 / math.sqrt(1.0 - beta**2)
             if abs(_gamma_chk * (A + beta * B) - rhs) > 1e-6 * max(1.0, abs(rhs)):
-                _cluster_dbg(
-                    f"  WARNING: spurious quadratic root (γ(A+βB)={_gamma_chk * (A + beta * B):.4f} != rhs={rhs:.4f})"
-                )
                 result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
                 for idx in spectator_indices:
                     result["spectators"][idx] = FourMomentum(orig_momenta[idx])
@@ -1368,15 +1256,11 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
 
     # Verify |β| < 1 (the rescaling of a massless recoil system needs only r > 0)
     if rescale is None and abs(beta) >= 1.0:
-        _cluster_dbg(f"  WARNING: |β| = {abs(beta):.6f} >= 1 (superluminal)")
         result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
         for idx in spectator_indices:
             result["spectators"][idx] = FourMomentum(orig_momenta[idx])
         result["method"] = "fks_fsr_superluminal"
         return result
-
-    if DEBUG:
-        _cluster_dbg(f"  [FKS FSR] β={beta:.6f}, n̂=({n_rec[0]:.4f}, {n_rec[1]:.4f}, {n_rec[2]:.4f})")
 
     if rescale is None:
         # Apply boost B to each spectator: k̄ᵢ = B kᵢ
@@ -1428,19 +1312,6 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     result["mother"] = mother
     result["method"] = "fks_fsr_massive_onshell"
 
-    if DEBUG:
-        mother_m2 = _m2(mother)
-        mother_m = math.sqrt(max(0, mother_m2))
-        _cluster_dbg(f"  Mother: m={mother_m:.4f} (target={mother_mass:.4f}), Δm²={mother_m2 - M2:.2e}")
-        _cluster_dbg(f"  k_rec boost: E {k_rec.E:.4f} -> {k_rec_boosted.E:.4f}")
-        p_final = FourMomentum(mother)
-        for idx in spectator_indices:
-            p_final += result["spectators"][idx]
-        _cluster_dbg(
-            f"  Conservation: dE={abs(q.E - p_final.E):.2e}, dpx={abs(q.px - p_final.px):.2e}, "
-            f"dpy={abs(q.py - p_final.py):.2e}, dpz={abs(q.pz - p_final.pz):.2e}"
-        )
-
     return result
 
 
@@ -1483,11 +1354,6 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
     # Save original momenta
     orig_momenta = [FourMomentum(p) for p in event]
     decay_products = getattr(event, "_fxfx_decay_products", None)
-
-    cluster_type = "ISR" if fks_i <= 1 else "FSR"
-    _cluster_dbg(
-        f"FxFx merge: {cluster_type} clustering [{fks_i}]+[{fks_j}] -> mother (pid={moth[0]['id']})"
-    )
 
     if fks_i <= 1:
         # ISR: FKS Section 5.1 mapping
@@ -1574,65 +1440,6 @@ def fxfx_merge_particles_kinematics(event, i, j, moth):
             > 1e-6 * cons_scale
         ):
             FKS_QUALITY_COUNTS["merge_momentum_conservation_violation"] += 1
-
-    # Debug: before/after comparison and momentum conservation verification
-    if DEBUG:
-        _cluster_dbg("-" * 70)
-        _cluster_dbg("RESHUFFLING SUMMARY")
-        _cluster_dbg("-" * 70)
-        _cluster_dbg("BEFORE reshuffling (original momenta):")
-        p_in_sum_orig = FourMomentum()
-        p_out_sum_orig = FourMomentum()
-        for idx, p in enumerate(orig_momenta):
-            m = math.sqrt(max(0, _m2(p)))
-            is_in = idx <= 1
-            _cluster_dbg(
-                f"  [{idx}] {'IS' if is_in else 'FS'}: E={p.E:10.4f}, px={p.px:10.4f}, py={p.py:10.4f}, pz={p.pz:10.4f}, m={m:8.4f}"
-            )
-            if is_in:
-                p_in_sum_orig += p
-            else:
-                p_out_sum_orig += p
-        _cluster_dbg(
-            f"  SUM IS: E={p_in_sum_orig.E:10.4f}, px={p_in_sum_orig.px:10.4f}, py={p_in_sum_orig.py:10.4f}, pz={p_in_sum_orig.pz:10.4f}"
-        )
-        _cluster_dbg(
-            f"  SUM FS: E={p_out_sum_orig.E:10.4f}, px={p_out_sum_orig.px:10.4f}, py={p_out_sum_orig.py:10.4f}, pz={p_out_sum_orig.pz:10.4f}"
-        )
-        _cluster_dbg("AFTER reshuffling (new momenta):")
-        p_in_sum_new = FourMomentum()
-        p_out_sum_new = FourMomentum()
-        for idx, p in enumerate(event):
-            m = math.sqrt(max(0, _m2(p)))
-            is_in = idx <= 1
-            pdg = getattr(p, "pid", "?")
-            _cluster_dbg(
-                f"  [{idx}] {'IS' if is_in else 'FS'} pdg={pdg:4}: E={p.E:10.4f}, px={p.px:10.4f}, py={p.py:10.4f}, pz={p.pz:10.4f}, m={m:8.4f}"
-            )
-            if is_in:
-                p_in_sum_new += p
-            else:
-                p_out_sum_new += p
-        _cluster_dbg(
-            f"  SUM IS: E={p_in_sum_new.E:10.4f}, px={p_in_sum_new.px:10.4f}, py={p_in_sum_new.py:10.4f}, pz={p_in_sum_new.pz:10.4f}"
-        )
-        _cluster_dbg(
-            f"  SUM FS: E={p_out_sum_new.E:10.4f}, px={p_out_sum_new.px:10.4f}, py={p_out_sum_new.py:10.4f}, pz={p_out_sum_new.pz:10.4f}"
-        )
-        delta_E = abs(p_in_sum_new.E - p_out_sum_new.E)
-        delta_px = abs(p_in_sum_new.px - p_out_sum_new.px)
-        delta_py = abs(p_in_sum_new.py - p_out_sum_new.py)
-        delta_pz = abs(p_in_sum_new.pz - p_out_sum_new.pz)
-        _cluster_dbg(
-            f"  CONSERVATION: |ΔE|={delta_E:.2e}, |Δpx|={delta_px:.2e}, |Δpy|={delta_py:.2e}, |Δpz|={delta_pz:.2e}"
-        )
-        if cluster_type == "FSR":
-            mother_m = math.sqrt(max(0, _m2(event[fks_i])))
-            target_m = _get_mother_mass(abs(moth[0]["id"]))
-            _cluster_dbg(
-                f"  MOTHER MASS: computed={mother_m:.4f}, target={target_m:.4f}, Δ={abs(mother_m - target_m):.2e} GeV"
-            )
-        _cluster_dbg("=" * 70)
 
     return method
 
@@ -1857,15 +1664,9 @@ class DensityHelper:
         Returns:
             numpy array: Full density matrix or None if computation fails
         """
-        _dbg(
-            f"[DensityHelper.compute_density_matrix] ENTER target_pdgs={target_pdgs}, res_dims={res_dims}"
-        )
 
         # Configure for this specific calculation
         self._configure_for_pdgs(target_pdgs, res_dims)
-        _dbg(
-            f"[DensityHelper] Configured: n_changing={self.number_changing_helicities}, n_comb={self.number_combinations}"
-        )
 
         # Get event tag and find matching module
         tag, order = event.get_tag_and_order()
@@ -1874,36 +1675,22 @@ class DensityHelper:
             tag = (tuple(order[0]), tuple(order[1]))
 
         if tag not in self.id_to_path:
-            _dbg(f"[DensityHelper] Tag {tag} not in id_to_path")
-            _dbg(f"[DensityHelper] Available tags: {list(self.id_to_path.keys())[:5]}...")
             return None
 
         orig_order, Pdir, hel_dict = self.id_to_path[tag]
         base = os.path.basename(os.path.dirname(Pdir))
         moduletag = (base, 2)
-        _dbg(f"[DensityHelper] Tag found, moduletag={moduletag}")
 
         if moduletag not in self.f2pylib:
-            _dbg(f"[DensityHelper] Module {moduletag} not in f2pylib")
-            _dbg(f"[DensityHelper] Available modules: {list(self.f2pylib.keys())[:5]}...")
             return None
 
         module = self.f2pylib[moduletag]
-        _dbg(f"[DensityHelper] Got module: {module}")
 
         # Get momenta
-        # Debug: show event particles before extracting momenta
-        _dbg(f"[DensityHelper] Event has {len(event)} particles:")
-        for i, p in enumerate(event):
-            _dbg(
-                f"[DensityHelper]   [{i}] pid={p.pid}, status={p.status}, E={p.E:.4f}, px={p.px:.4f}, py={p.py:.4f}, pz={p.pz:.4f}"
-            )
-
         if self.keep_ordering:
             all_p = [event.get_momenta(orig_order)]
         else:
             all_p = event.get_all_momenta(orig_order)
-        _dbg(f"[DensityHelper] get_momenta returned: {all_p}")
 
         # Apply boost (skipped for EW Sudakov)
         boost_corrected = [-1]
@@ -1916,9 +1703,6 @@ class DensityHelper:
 
         # Get particle positions for density matrix
         pos_corrected = self._find_particle_positions(orig_order, target_pdgs)
-        _dbg(
-            f"[DensityHelper] Particle positions for {target_pdgs}: {pos_corrected} (orig_order={orig_order})"
-        )
 
         # Get module prefix - must find the correct one for this specific tag
         # module.get_pdg_order() returns (all_pdgs, all_pids)
@@ -1949,14 +1733,9 @@ class DensityHelper:
                 break
 
         if proc_idx is None:
-            _dbg(f"[DensityHelper] Could not find matching process for tag {lookup_tag}")
-            _dbg(
-                f"[DensityHelper] Available: {[(tuple(sorted(p[:nincoming])), tuple(sorted(p[nincoming:]))) for p in all_pdgs[:5]]}..."
-            )
             return None
 
         prefix = all_prefixes[proc_idx]
-        _dbg(f"[DensityHelper] Found process index {proc_idx}, prefix={prefix}")
 
         # Initialize param card (once per module) - derive from Pdir
         # Pdir is: /path/to/rw_me_density_prod/SubProcesses
@@ -1965,51 +1744,32 @@ class DensityHelper:
         if module_id not in self._initialized_modules:
             density_me_dir = os.path.dirname(Pdir)  # Goes from SubProcesses to rw_me_density_prod
             Card_dir = os.path.join(density_me_dir, "Cards", "param_card.dat")
-            _dbg(f"[DensityHelper] Using Card_dir={Card_dir}")
             if os.path.exists(Card_dir):
                 Initialise = getattr(module, "initialise", None)
-                _dbg(f"[DensityHelper] Initialise function exists: {Initialise is not None}")
                 if Initialise:
                     Initialise(Card_dir)
                 InitModel = getattr(module, prefix + "initialisemodel", None)
-                _dbg(
-                    f"[DensityHelper] {prefix}initialisemodel function exists: {InitModel is not None}"
-                )
                 if InitModel:
                     InitModel(Card_dir)
-            else:
-                _dbg("[DensityHelper] WARNING: Card_dir does not exist!")
             self._initialized_modules.add(module_id)
 
         # Call GET_DENSITY via F2PY.
-        # Two module conventions exist:
-        #   (legacy)  per-subprocess symbol  <prefix>get_density(p, pos, n_changing, allow_hel, n_comb, alphas)
-        #   (current) unified dispatcher       py_get_density(pdgs, procid, p, pos, allow_hel, alphas, scale2)
+        # Two module conventions are supported:
+        #   per-subprocess symbol  <prefix>get_density(p, pos, n_changing, allow_hel, n_comb, alphas)
+        #   unified dispatcher     py_get_density(pdgs, procid, p, pos, allow_hel, alphas, scale2)
         #             -> F77_DENSITY selects the subprocess by matching PDGS when procid <= 0.
         #             MG5 3.8.1 f2py signature (f2py_wrapper_all.inc): n_comb, n_changing and
         #             npdg are hidden and inferred from len(allow_hel)/len(pos), len(pos), len(pdgs).
-        # Older density modules (e.g. ttHj) f2py-exported the per-process symbol; the current
-        # MG5 f2py wrapper (write_density_matrix_wrapper) exports ONLY the dispatcher.
-        # Try per-process first (backward-compat), then fall back to the dispatcher.
+        # Density modules such as ttHj f2py-export the per-subprocess symbol; the MG5 f2py
+        # wrapper (write_density_matrix_wrapper) exports ONLY the dispatcher.
+        # The per-subprocess symbol is tried first, then the dispatcher.
         func_name = prefix + "get_density"
         get_density_func = getattr(module, func_name, None)
         use_density_dispatcher = False
-        if get_density_func is not None:
-            _dbg(f"[DensityHelper] Using per-process density function: {func_name}")
-        else:
+        if get_density_func is None:
             get_density_func = getattr(module, "py_get_density", None)
             use_density_dispatcher = True
-            _dbg(
-                f"[DensityHelper] {func_name} absent; using unified dispatcher py_get_density "
-                f"(present={get_density_func is not None})"
-            )
         if get_density_func is None:
-            _dbg(
-                f"[DensityHelper] No density entry point found (neither {func_name} nor py_get_density)"
-            )
-            _dbg(
-                f"[DensityHelper] Available functions: {[f for f in dir(module) if 'get_density' in f.lower()]}"
-            )
             return None
 
         # Arguments needed only by the unified dispatcher.
@@ -2023,38 +1783,16 @@ class DensityHelper:
         density_procid = -1
 
         me_value = None
-        _dbg(
-            f"[DensityHelper] About to call get_density_func, n_changing={self.number_changing_helicities}, n_comb={self.number_combinations}, aqcd={event.aqcd}"
-        )
 
         # Ensure arrays are proper numpy types for safe f2py calls
         # (defensive - source functions should already return correct types)
         pos_arr = np.asarray(pos_corrected, dtype=np.int32)
         hel_arr = np.asarray(self.allowed_helicities, dtype=np.int32)
-        _dbg(f"[DensityHelper] pos_arr={pos_arr}, hel_arr={hel_arr[:min(10, len(hel_arr))]}")
 
         for i in range(len(all_p)):
             # NOTE: all_p[i] is ALREADY in Fortran layout (4, n_particles) from rotation_density
             # Do NOT call invert_momenta again - that would double-transpose back to Python layout!
             pinv = np.asfortranarray(all_p[i], dtype=np.float64)
-            _dbg(
-                f"[DensityHelper] Calling Fortran get_density... pinv.shape={pinv.shape}, pinv.dtype={pinv.dtype}"
-            )
-            _dbg(
-                f"[DensityHelper] Momenta (E,px,py,pz per particle): {pinv.T if pinv.shape[0] == 4 else pinv}"
-            )
-            # Validate momenta for debugging NaN issues
-            if np.any(np.isnan(pinv)) or np.any(np.isinf(pinv)):
-                _dbg("[DensityHelper] WARNING: NaN/Inf in input momenta!")
-            # Check energy positivity
-            E_values = pinv[0, :] if pinv.shape[0] == 4 else pinv[:, 0]
-            _dbg(f"[DensityHelper] Energies: {E_values}")
-            # Check momentum conservation
-            if pinv.shape[0] == 4:  # Fortran layout (4, n_particles)
-                p_sum = np.sum(pinv[:, 1:], axis=1) - pinv[:, 0]  # FS - IS
-                _dbg(
-                    f"[DensityHelper] p_sum (FS-IS): E={p_sum[0]:.4f}, px={p_sum[1]:.4f}, py={p_sum[2]:.4f}, pz={p_sum[3]:.4f}"
-                )
             if use_density_dispatcher:
                 # py_get_density(pdgs, procid, p, pos, allow_hel, alphas, scale2): the
                 # MG5 3.8.1 signature. n_comb is inferred as len(allow_hel)/len(pos),
@@ -2079,24 +1817,12 @@ class DensityHelper:
                     self.number_combinations,
                     event.aqcd,
                 )
-            _dbg(
-                f"[DensityHelper] Fortran returned, production_matrix type={type(production_matrix)}"
-            )
 
             # Convert the packed upper triangle to the full matrix
             # Use integer division (//) to ensure len_tri is an int
             len_tri = self.number_combinations * (self.number_combinations + 1) // 2
-            _dbg(
-                f"[DensityHelper] Calling unpack_density_triangle with len_tri={len_tri}, production_matrix shape={production_matrix.shape if hasattr(production_matrix, 'shape') else len(production_matrix)}"
-            )
-            # Debug: show raw Fortran output (first few elements)
-            if hasattr(production_matrix, "__len__") and len(production_matrix) >= len_tri:
-                _dbg(
-                    f"[DensityHelper] Raw Fortran output (first {len_tri}): {production_matrix[:len_tri]}"
-                )
             # Upper triangle as stored (B[i,k] = M_i conj(M_k)), lower by conjugation
             me_value = unpack_density_triangle(production_matrix, len_tri)
-            _dbg(f"[DensityHelper] unpacked matrix shape: {np.array(me_value).shape}")
 
         return np.array(me_value) if me_value is not None else None
 
@@ -2451,7 +2177,6 @@ class ResonanceIdentifier:
 
         for i, particle in enumerate(event):
             pdg = getattr(particle, "pdg", None) or getattr(particle, "pid", None)
-            status = getattr(particle, "status", 1)
 
             if pdg is None:
                 continue
@@ -2461,10 +2186,6 @@ class ResonanceIdentifier:
 
                 if decay_products:
                     results.append((i, int(pdg), decay_products))
-                elif status == 2:
-                    _dbg(
-                        f"Intermediate resonance {pdg} at index {i} has no identified decay products"
-                    )
 
         return results
 
@@ -2494,11 +2215,6 @@ def compute_density_weight(
     Returns:
         Event weight w (NLO accurate)
     """
-    _dbg("compute_density_weight: start")
-    _dbg(f"  B trace={B.trace():.6e}")
-    if C is not None:
-        _dbg(f"  C trace={C.trace():.6e}")
-    _dbg(f"  delta={delta}")
     B_ewsl = B.apply_sudakov(delta)
 
     if C is not None:
@@ -2509,26 +2225,22 @@ def compute_density_weight(
         denominator = B.trace()
 
     if abs(denominator) < 1e-15:
-        _dbg("Denominator <B,C> ≈ 0, returning weight=1")
         return 1.0
 
-    _dbg(f"  numerator={numerator}")
-    _dbg(f"  denominator={denominator}")
     return numerator / denominator
 
 
 # =============================================================================
-# Logging and Diagnostics
+# Processed-event counter
 # =============================================================================
 
 
 class DensitySudakovLogger:
     """
-    Structured logging for density-matrix Sudakov reweighting.
+    Counter of the events processed by the density-matrix Sudakov reweighting.
     """
 
-    def __init__(self, verbose: bool = False):
-        self.verbose = verbose
+    def __init__(self):
         self.events_processed = 0
 
     def log_event(
@@ -2539,22 +2251,8 @@ class DensitySudakovLogger:
         weight: float,
         clustering_info: Optional[dict] = None,
     ):
-        """Log information for a single event."""
+        """Count one processed event."""
         self.events_processed += 1
-
-        if not self.verbose:
-            return
-
-        res_str = ", ".join(f"{pdg}@{idx}" for idx, pdg in resonances)
-        msg = (
-            f"Event {self.events_processed}: mode={mode}, "
-            f"resonances=[{res_str}], D={dimension}, w={weight:.6f}"
-        )
-
-        if clustering_info:
-            msg += f", clustering={clustering_info.get('type', 'unknown')}"
-
-        _dbg(msg)
 
 
 # =============================================================================
@@ -2589,22 +2287,19 @@ class FxFxEWSudakovMixin:
         """
         global MW_POLE, MZ_POLE, MT_POLE, MH_POLE, _POLE_MASSES_INITIALIZED
         if _POLE_MASSES_INITIALIZED:
-            _dbg("[INIT] _init_pole_masses_from_banner: already initialized, skipping")
             return
         _POLE_MASSES_INITIALIZED = True
 
         banner = getattr(self, 'banner', None)
         if banner is None:
-            _dbg("[INIT] _init_pole_masses_from_banner: no banner attached, using compile-time defaults for MW/MZ/MT/MH")
             return
         mass_map = {24: 'MW_POLE', 23: 'MZ_POLE', 6: 'MT_POLE', 25: 'MH_POLE'}
         for pdg, name in mass_map.items():
             try:
                 val = float(banner.get_detail('param_card', 'mass', pdg).value)
                 globals()[name] = val
-                _dbg(f"[INIT] {name} = {val} (from param_card, PDG {pdg})")
             except Exception:
-                _dbg(f"[INIT] {name} = {globals()[name]} (default, param_card read failed)")
+                pass
 
     # =========================================================================
     # FxFx Clustering Methods
@@ -2678,13 +2373,6 @@ class FxFxEWSudakovMixin:
             if tree[lhe_idx]["status"] == 2 and tree[lhe_idx]["children"]:
                 compute_depth(lhe_idx)
 
-        _dbg(f"[FORCED] Built decay tree with {len(tree)} nodes")
-        for lhe_idx, node in tree.items():
-            if node["children"]:
-                _dbg(
-                    f"[FORCED]   {lhe_idx} (pdg={node['pdg']}, depth={node['depth']}) -> children={node['children']}"
-                )
-
         return tree
 
     def _generate_forced_cluster_steps(self, event, decay_tree):
@@ -2740,10 +2428,6 @@ class FxFxEWSudakovMixin:
             )
             steps.append(step)
 
-            _dbg(
-                f"[FORCED] Step: cluster {children} -> {lhe_idx} (pdg={node['pdg']}), scale={scale:.2f} GeV, depth={node['depth']}"
-            )
-
         return steps
 
     def _apply_forced_clustering(self, event, steps, track_decays=False):
@@ -2792,23 +2476,10 @@ class FxFxEWSudakovMixin:
             lhe_to_pos[lhe_idx] = i
             groups.append(set([lhe_idx]))
 
-        _dbg("")
-        _dbg("=" * 70)
-        _dbg("  STAGE 1: MADSPIN FORCED CLUSTERING (Decay Reversal)")
-        _dbg("=" * 70)
-        _dbg(f"[FORCED] Starting forced clustering with {len(steps)} steps")
-        _dbg(f"[FORCED] Initial event has {len(buff_event)} particles")
-
         for step_num, step in enumerate(steps):
-            _dbg(
-                f"[FORCED] === Step {step_num + 1}: cluster {step.children_lhe_idx} -> {step.mother_lhe_idx} (pdg={step.mother_pdg}) ==="
-            )
 
             # MadSpin always produces 1->2 decays
             if len(step.children_lhe_idx) != 2:
-                _dbg(
-                    f"[FORCED]   WARNING: Expected 2 children, got {len(step.children_lhe_idx)}, skipping"
-                )
                 # Record the skip: the mother is left un-restored (status=2,
                 # later stripped), i.e. the hard process is NOT correctly
                 # reconstructed — the policy/counters must see this.
@@ -2822,13 +2493,11 @@ class FxFxEWSudakovMixin:
 
             # Find current positions
             if child1_lhe not in lhe_to_pos or child2_lhe not in lhe_to_pos:
-                _dbg("[FORCED]   Children not found in current event, skipping")
                 forced_methods.append("forced_step_skipped")
                 if _FKS_COUNT_ACTIVE:
                     FKS_METHOD_COUNTS["forced_step_skipped"] += 1
                 continue
             if mother_lhe not in lhe_to_pos:
-                _dbg("[FORCED]   Mother not found in current event, skipping")
                 forced_methods.append("forced_step_skipped")
                 if _FKS_COUNT_ACTIVE:
                     FKS_METHOD_COUNTS["forced_step_skipped"] += 1
@@ -2837,10 +2506,6 @@ class FxFxEWSudakovMixin:
             child1_pos = lhe_to_pos[child1_lhe]
             child2_pos = lhe_to_pos[child2_lhe]
             mother_pos = lhe_to_pos[mother_lhe]
-
-            _dbg(
-                f"[FORCED]   Positions: child1={child1_pos}, child2={child2_pos}, mother={mother_pos}"
-            )
 
             # =====================================================================
             # FKS RESHUFFLING FOR MADSPIN FORCED CLUSTERING
@@ -2867,8 +2532,6 @@ class FxFxEWSudakovMixin:
                     active_positions.append(pos)
                 # Skip status=2 intermediates (like the mother before clustering)
 
-            _dbg(f"[FORCED]   Active positions for FKS: {active_positions}")
-
             # Build orig_momenta for FKS (only active particles)
             # Create mapping: active_idx -> buff_event position
             active_to_buff = {i: pos for i, pos in enumerate(active_positions)}
@@ -2878,7 +2541,6 @@ class FxFxEWSudakovMixin:
 
             # Map child positions to active indices
             if child1_pos not in buff_to_active or child2_pos not in buff_to_active:
-                _dbg("[FORCED]   WARNING: Children not in active list, skipping reshuffling")
                 # Fallback: just sum momenta (off-shell)
                 p1 = buff_event[child1_pos]
                 p2 = buff_event[child2_pos]
@@ -2907,7 +2569,7 @@ class FxFxEWSudakovMixin:
                 child1_active = buff_to_active[child1_pos]
                 child2_active = buff_to_active[child2_pos]
 
-                # Get child momenta for logging
+                # Off-shell mother momentum from the two children
                 p1 = buff_event[child1_pos]
                 p2 = buff_event[child2_pos]
                 mother_E = float(p1.E) + float(p2.E)
@@ -2916,8 +2578,6 @@ class FxFxEWSudakovMixin:
                 mother_pz = float(p1.pz) + float(p2.pz)
                 off_shell_m2 = mother_E**2 - mother_px**2 - mother_py**2 - mother_pz**2
                 off_shell_m = math.sqrt(max(0, off_shell_m2))
-
-                _dbg(f"[FORCED]   Off-shell mother: E={mother_E:.4f}, m={off_shell_m:.4f} GeV")
 
                 # Get target mass (pole mass for known resonances, else off-shell)
                 target_mass = _get_mother_mass(abs(step.mother_pdg)) or off_shell_m
@@ -2932,7 +2592,6 @@ class FxFxEWSudakovMixin:
 
                 # Compute CM boost: q = p1 + p2 (beams)
                 q_lab = orig_momenta[0] + orig_momenta[1]
-                sqrt_s = math.sqrt(max(0, _m2(q_lab)))
 
                 # Beta for boost to CM frame (along z since beams are along z)
                 if q_lab.E > 1e-10:
@@ -2943,8 +2602,6 @@ class FxFxEWSudakovMixin:
                 # Transform all active momenta to CM frame (boost along z)
                 _z_hat = (0, 0, 1)
                 orig_momenta_cm = [_boost_along_direction(p, beta_cm, _z_hat) for p in orig_momenta]
-
-                _dbg(f"[FORCED]   CM boost: β={beta_cm:.6f}, √s={sqrt_s:.2f} GeV")
 
                 # Prepare moth argument for _fks_fsr_mapping
                 moth = [{"number": child1_active + 1, "id": step.mother_pdg}]
@@ -2972,8 +2629,6 @@ class FxFxEWSudakovMixin:
                             decay_products[pos], spectator_transform,
                         )
 
-                _dbg(f"[FORCED]   FKS method: {fks_result['method']}")
-
                 # Transform results back to lab frame (inverse boost: -beta)
                 onshell_mom_lab = _boost_along_direction(fks_result["mother"], -beta_cm, _z_hat)
                 beam0_lab = _boost_along_direction(fks_result["beams"][0], -beta_cm, _z_hat)
@@ -2996,9 +2651,8 @@ class FxFxEWSudakovMixin:
 
                 # Set mass based on FKS result: pole mass only when the mapping
                 # actually reached the pole; the actual invariant mass for EVERY
-                # fallback mode (previously only no_solution/superluminal were
-                # relabelled — the other fallbacks kept the pole label on an
-                # off-pole momentum and crashed check_kinematics_only downstream).
+                # fallback mode, so the label matches the off-pole momentum that
+                # check_kinematics_only validates downstream.
                 fks_method = fks_result.get("method", "")
                 if _FKS_COUNT_ACTIVE:
                     FKS_METHOD_COUNTS[fks_method] += 1
@@ -3007,13 +2661,6 @@ class FxFxEWSudakovMixin:
                     mother_p.mass = target_mass
                 else:
                     mother_p.mass = onshell_m
-                    _dbg(
-                        f"[FORCED]   WARNING: FKS mapping fell back ({fks_method}), labelling with invariant mass"
-                    )
-
-                _dbg(
-                    f"[FORCED]   On-shell mother: E={onshell_mom_lab.E:.4f}, m={onshell_m:.4f} GeV (target={target_mass:.4f})"
-                )
 
                 # Apply beam modifications
                 buff_event[0].E = beam0_lab.E
@@ -3033,11 +2680,6 @@ class FxFxEWSudakovMixin:
                         buff_event[buff_pos].px = boosted_p.px
                         buff_event[buff_pos].py = boosted_p.py
                         buff_event[buff_pos].pz = boosted_p.pz
-                        _dbg(f"[FORCED]   Boosted spectator at pos {buff_pos}: E={boosted_p.E:.4f}")
-
-                _dbg(
-                    f"[FORCED]   Mass shift: {off_shell_m:.4f} -> {onshell_m:.4f} GeV (Δ={onshell_m - off_shell_m:+.4f})"
-                )
 
             # Merge groups: mother group now includes children's LHE indices
             mother_group = groups[mother_pos]
@@ -3045,8 +2687,6 @@ class FxFxEWSudakovMixin:
             child2_group = groups[child2_pos]
             mother_group.update(child1_group)
             mother_group.update(child2_group)
-
-            _dbg(f"[FORCED]   Merged groups: mother now contains {mother_group}")
 
             # Remove children from event (higher index first to preserve lower indices)
             children_pos = sorted([child1_pos, child2_pos], reverse=True)
@@ -3066,14 +2706,6 @@ class FxFxEWSudakovMixin:
                 pos_to_lhe[i] = rep_lhe
                 for lhe_idx in grp:
                     lhe_to_pos[lhe_idx] = i
-
-            _dbg(f"[FORCED]   After removal: {len(buff_event)} particles, {len(groups)} groups")
-
-        _dbg(f"[FORCED] Forced clustering complete. Final event has {len(buff_event)} particles")
-        _dbg("=" * 70)
-        _dbg("  END STAGE 1: Hard process restored")
-        _dbg("=" * 70)
-        _dbg("")
 
         buff_event.fks_methods = forced_methods
         return buff_event, groups
@@ -3141,7 +2773,6 @@ class FxFxEWSudakovMixin:
             If return_groups=False: (clustered_event, sorted_tag) or None
             If return_groups=True: (clustered_event, sorted_tag, groups) or None
         """
-        _dbg(f"[CLUSTER] _cluster_fxfx_event ENTER: npart={len(event)}, record_tag={record_tag}, return_groups={return_groups}")
 
         # Mapping counters include only the first clustering pass of each
         # main-loop event; event outcomes are counted by _count_fks_event.
@@ -3154,20 +2785,14 @@ class FxFxEWSudakovMixin:
 
         # Step 1: Check for MadSpin decayed resonances
         decayed_resonances = ResonanceIdentifier.find_decayed_resonances(event)
-        _dbg(f"[CLUSTER]   decayed_resonances detected: {len(decayed_resonances) if decayed_resonances else 0}")
 
         if decayed_resonances:
-            _dbg(
-                f"[CLUSTER] Found {len(decayed_resonances)} decayed resonances, applying forced clustering"
-            )
 
             # Build decay tree from mother pointers
             decay_tree = self._build_madspin_decay_tree(event)
-            _dbg(f"[CLUSTER]   built decay_tree with {len(decay_tree)} nodes")
 
             # Generate forced clustering steps (depth-first order)
             forced_steps = self._generate_forced_cluster_steps(event, decay_tree)
-            _dbg(f"[CLUSTER]   forced_steps generated: {len(forced_steps) if forced_steps else 0}")
 
             if forced_steps:
                 # Apply forced clustering to restore hard process
@@ -3175,13 +2800,8 @@ class FxFxEWSudakovMixin:
                     event, forced_steps, track_decays=return_groups,
                 )
 
-                _dbg(
-                    f"[CLUSTER] Forced clustering complete, hard process has {len(hard_event)} particles"
-                )
-
                 # Now apply FxFx clustering on the hard process
                 # Pass the forced_groups to maintain LHE index tracking
-                _dbg(f"[CLUSTER]   -> dispatching internal cluster on hard_event with forced groups (len={len(forced_groups) if forced_groups else 0})")
                 return self._cluster_fxfx_event_internal(
                     hard_event,
                     original_event=event,
@@ -3189,11 +2809,8 @@ class FxFxEWSudakovMixin:
                     record_tag=record_tag,
                     return_groups=return_groups,
                 )
-            else:
-                _dbg("[CLUSTER] No forced steps generated, using standard FxFx")
 
         # No MadSpin decays or no forced steps: use standard FxFx clustering
-        _dbg("[CLUSTER]   -> dispatching standard internal cluster (no forced clustering)")
         return self._cluster_fxfx_event_internal(
             event,
             original_event=event,
@@ -3224,23 +2841,11 @@ class FxFxEWSudakovMixin:
         if original_event is None:
             original_event = event
 
-        _dbg("")
-        _dbg("=" * 70)
-        _dbg("  STAGE 2: FXFX CLUSTERING (QCD/EW Jet Clustering)")
-        _dbg("=" * 70)
-        _dbg(
-            f"[FXFX] _cluster_fxfx_event_internal: start (record_tag={record_tag}, return_groups={return_groups})"
-        )
-        _dbg(f"[FXFX]   input particles={len(event)}")
-        _dbg(f"[FXFX]   initial_groups provided: {initial_groups is not None}")
-
         # Parse FxFx clustering tag from the original event (it's preserved through MadSpin)
         clustering = self._fxfx_parse_clustering(original_event)
         if not clustering:
-            _dbg("[FXFX]   no <clustering> block found")
             if initial_groups is not None:
                 # Forced clustering was done - return the hard process directly
-                _dbg("[FXFX]   returning forced-clustered hard process (no further FxFx)")
                 try:
                     sorted_tag = event.get_tag_and_order()[0]
                 except Exception:
@@ -3255,9 +2860,6 @@ class FxFxEWSudakovMixin:
                     return (event, sorted_tag, initial_groups)
                 return (event, sorted_tag)
             return None
-        _dbg(
-            f"[FXFX]   clustering attrs: type={clustering.get('type')}, steps={len(clustering.get('steps', []))}"
-        )
 
         buff_event = copy.deepcopy(event)
         to_pop = [
@@ -3291,7 +2893,6 @@ class FxFxEWSudakovMixin:
                 i + 1: lhe_external_indices[i] for i in range(len(lhe_external_indices))
             }
             ext_index_max = len(lhe_external_indices)
-            _dbg("[FXFX]   using initial_groups from forced clustering")
         else:
             lhe_external_indices = [
                 i
@@ -3304,10 +2905,6 @@ class FxFxEWSudakovMixin:
             }
             ext_index_max = len(lhe_external_indices)
             groups = [set([lhe_external_indices[k]]) for k in range(len(buff_event))]
-
-        _dbg(f"[FXFX]   external indices (LHE): {lhe_external_indices}")
-        _dbg(f"[FXFX]   ext_index_to_lhe: {ext_index_to_lhe}")
-        _dbg(f"[FXFX]   groups: {[sorted(list(g)) for g in groups]}")
 
         def _find_position_single(i1b):
             for k, g in enumerate(groups):
@@ -3382,7 +2979,6 @@ class FxFxEWSudakovMixin:
         # Default 1.5 allows clustering up to ~98 GeV (covers M_Z = 91.2 GeV)
         mW2_cluster_scale = getattr(self, "mW2_cluster_scale", 1.5)
         mW2_threshold = mW2_cluster_scale * mW2
-        _dbg(f"[FXFX]   mW2_threshold={mW2_threshold:.3f} (scale={mW2_cluster_scale})")
 
         # =====================================================================
         # CLUSTERING ORDER: Use original LHE step order (scale-ordered)
@@ -3392,18 +2988,10 @@ class FxFxEWSudakovMixin:
         original_steps = clustering.get("steps", [])
         ordered_steps = sorted(original_steps, key=lambda t: t["n"])
 
-        _dbg("[FXFX]   CLUSTERING STEPS (scale-ordered):")
-        for s in ordered_steps:
-            mom = s.get("mom")
-            idxs = s.get("idxs", [])
-            _dbg(f"[FXFX]       step {s['n']}: idxs={idxs}, mom={mom}")
-
         stop_clustering = False
         for _step in ordered_steps:
-            _stepnum = _step["n"]
             idxs = _step["idxs"]
             _step_mom = _step.get("mom")
-            _dbg(f"[FXFX]   step {_stepnum}: idxs={idxs}, mom={_step_mom}, groups={len(groups)}")
 
             while True:
                 all_positions = list(range(len(groups)))
@@ -3423,20 +3011,13 @@ class FxFxEWSudakovMixin:
                     stop_clustering = True
                     break
 
-                # Debug: show all pair invariants vs threshold
-                _dbg(
-                    f"[FXFX]   INVARIANT CHECK (threshold={mW2_threshold:.1f} GeV² = {mW2_cluster_scale}×MW²):"
-                )
                 all_above = True
                 for pos_i, pos_j, sij in all_pairs_sij:
                     above = sij >= mW2_threshold
-                    mark = "✓ ABOVE" if above else "✗ below"
-                    _dbg(f"[FXFX]     s({pos_i},{pos_j}) = {sij:.1f} GeV²  {mark} threshold")
                     if not above:
                         all_above = False
 
                 if all_above:
-                    _dbg("[FXFX]   -> ALL pairs above threshold, STOP clustering (resolved)")
                     stop_clustering = True
                     break
 
@@ -3478,7 +3059,6 @@ class FxFxEWSudakovMixin:
 
                 if len(parent_pos) == 2:
                     ai, bj = parent_pos
-                    s_candidate = _s_groups_lhe_from_pos(ai, bj)
                     pair = (ai, bj)
                 else:
                     best = None
@@ -3492,16 +3072,9 @@ class FxFxEWSudakovMixin:
                     if best_pair is None:
                         break
                     pair = best_pair
-                    s_candidate = best
 
-                # Debug: show candidate pair invariant (info only)
                 # NOTE: We do NOT stop here based on single-pair threshold.
                 # The ALL-pairs check above handles "everything resolved" case.
-                sqrt_s_cand = math.sqrt(max(0, s_candidate))
-                _dbg(
-                    f"[FXFX]   CLUSTERING pair {pair}: s={s_candidate:.1f} GeV² (√s={sqrt_s_cand:.1f} GeV)"
-                )
-
                 a, b = sorted(pair)
                 keep = _choose_keep(a, b)
 
@@ -3534,61 +3107,32 @@ class FxFxEWSudakovMixin:
                         # Fix flavor using 3-point interaction rules, then charge conservation fixes sign
                         if is_gauge_boson_a and is_fermion_b:
                             # V + f -> f : take flavor from fermion
-                            old_step_mom = _step_mom
                             sign = 1 if _step_mom >= 0 else -1
                             _step_mom = (
                                 sign * abs_b
                             )  # sign from tag (initial guess), flavor from fermion
-                            _dbg(
-                                f"FxFx clustering: flavor fix V+f->f: {old_step_mom} -> {_step_mom} (sign={sign}, flavor={abs_b})"
-                            )
                         elif is_fermion_a and is_gauge_boson_b:
                             # f + V -> f : take flavor from fermion
-                            old_step_mom = _step_mom
                             sign = 1 if _step_mom >= 0 else -1
                             _step_mom = (
                                 sign * abs_a
                             )  # sign from tag (initial guess), flavor from fermion
-                            _dbg(
-                                f"FxFx clustering: flavor fix f+V->f: {old_step_mom} -> {_step_mom} (sign={sign}, flavor={abs_a})"
-                            )
                         elif is_quark_a and is_quark_b:
                             # q + q~ clustering -> gluon (if same flavor, opposite sign)
                             if abs_a == abs_b and pdg_a * pdg_b < 0:
                                 # Same flavor quark-antiquark -> gluon
                                 if abs(_step_mom) != 21:
-                                    old_step_mom = _step_mom
                                     _step_mom = 21
-                                    _dbg(
-                                        f"FxFx clustering: q+q~->g flavor fix: {old_step_mom} -> {_step_mom}"
-                                    )
-                                else:
-                                    _dbg(f"FxFx clustering: q+q~->g, keeping mom={_step_mom}")
-                            elif abs_a == abs_b and pdg_a * pdg_b > 0:
-                                # Same flavor, same sign (qq or q~q~) - shouldn't happen in valid QCD
-                                _dbg(f"FxFx clustering: same-sign q+q, keeping tag mom={_step_mom}")
-                            else:
-                                # Different flavors - flavor-changing clustering
-                                _dbg(
-                                    f"FxFx clustering: different flavor q+q', keeping tag mom={_step_mom} (pdg_a={pdg_a}, pdg_b={pdg_b})"
-                                )
+                            # Same-sign and different-flavor quark pairs keep the tag mother
                         elif is_lepton_a and is_lepton_b:
-                            # l + l~ clustering -> Z or photon (if same flavor)
-                            if abs_a == abs_b and pdg_a * pdg_b < 0:
-                                # Same flavor lepton-antilepton -> Z(23) or gamma(22)
-                                _dbg(f"FxFx clustering: l+l~->V, keeping tag mom={_step_mom}")
-                            else:
-                                _dbg(
-                                    f"FxFx clustering: lepton pair, keeping tag mom={_step_mom} (pdg_a={pdg_a}, pdg_b={pdg_b})"
-                                )
+                            # Lepton pairs (l + l~ -> Z or photon, and any other pair)
+                            # keep the tag mother
+                            pass
                         else:
                             # Use the existing family-based logic for other cases
                             emitter_state = False if (keep <= 1) else True
                             suggestions = suggest_mothers_from_interactions(
                                 self.model, ("QCD", "QED"), rep_a, rep_b, emitter_state
-                            )
-                            _dbg(
-                                f"FxFx clustering step {_stepnum}: _step_mom={_step_mom}, rep_a={rep_a}, rep_b={rep_b}, suggestions={[(c['mother_pdg'], _flavor_family(c['mother_pdg'])) for c in suggestions] if suggestions else []}"
                             )
                             family = _flavor_family(_step_mom)
                             if family and suggestions:
@@ -3596,53 +3140,23 @@ class FxFxEWSudakovMixin:
                                     if _flavor_family(cand["mother_pdg"]) == family:
                                         sug_pdg = int(cand["mother_pdg"])
                                         sign = 1 if _step_mom >= 0 else -1
-                                        old_step_mom = _step_mom
                                         _step_mom = sign * abs(sug_pdg)
-                                        _dbg(
-                                            f"FxFx clustering: updated _step_mom from {old_step_mom} to {_step_mom} (sug_pdg={sug_pdg}, sign={sign})"
-                                        )
                                         break
 
                     # Enforce global charge conservation by possibly flipping the mother sign
                     # This determines particle vs antiparticle after flavor is fixed
                     if _step_mom is not None:
                         try:
-                            old_mom = _step_mom
                             _step_mom, charge_changed = _fix_mother_sign_global(
                                 self.model, buff_event, a, b, _step_mom
                             )
-                            if charge_changed:
-                                _dbg(
-                                    f"FxFx global charge conservation fix (step {_stepnum}): {old_mom} -> {_step_mom}"
-                                )
-                        except RuntimeError as err:
-                            _dbg(f"Global charge conservation failed in FxFx clustering: {err}")
+                        except RuntimeError:
                             raise
 
                 if _step_mom is None:
                     break
 
                 moth_id = int(_step_mom)
-
-                # Diagnostic: show mother determination and path implication
-                sqrt_s = math.sqrt(max(0, s_candidate)) if s_candidate > 0 else 0
-                is_resonance = abs(moth_id) in (6, 23, 24)  # t, Z, W
-                path = "DENSITY" if is_resonance else "SCALAR"
-                boson_name = {
-                    21: "gluon",
-                    22: "photon",
-                    23: "Z",
-                    24: "W+",
-                    -24: "W-",
-                    6: "top",
-                    -6: "anti-top",
-                }.get(moth_id, str(moth_id))
-                _dbg(
-                    f"[FXFX]   MOTHER: pdg={moth_id} ({boson_name}), √s={sqrt_s:.2f} GeV, M_Z={MZ_POLE:.2f} GeV"
-                )
-                _dbg(
-                    f"[FXFX]   -> {boson_name} {'∈' if is_resonance else '∉'} {{t,W,Z}} => {path} PATH"
-                )
 
                 # STOP if this clustering would result in 2→1 with only γ/g in FS
                 # Compute what FS looks like after this clustering
@@ -3672,7 +3186,6 @@ class FxFxEWSudakovMixin:
                     fs_pdg = fs_after_pdgs[0]
                     fs_mass = _get_mother_mass(abs(fs_pdg))
                     if fs_mass < 1e-6:
-                        _dbg(f"[FXFX]   STOP: 2→1 with massless FS (pdg={fs_pdg})")
                         stop_clustering = True
                         break
 
@@ -3686,16 +3199,14 @@ class FxFxEWSudakovMixin:
                 except ValueError as e:
                     if "light-like" in str(e):
                         # Light-like p_clustered = can't boost, stop clustering here
-                        _dbg(f"[FXFX]   STOP: {e}")
                         if _FKS_COUNT_ACTIVE:
                             FKS_QUALITY_COUNTS["clustering_stopped_lightlike"] += 1
                         stop_clustering = True
                         break
                     if "math domain error" in str(e):
                         # NB: the event is NOT dropped — the caller falls back to
-                        # the legacy ickkw=0 scalar Sudakov and the event is
+                        # the ickkw=0 scalar Sudakov and the event is
                         # written to the output as usual.
-                        _dbg(f"[FXFX]   clustering aborted (reshuffling failed: {e}); caller falls back to legacy Sudakov, event kept")
                         if _FKS_COUNT_ACTIVE:
                             FKS_QUALITY_COUNTS["clustering_aborted_math_domain"] += 1
                         return None
@@ -3709,7 +3220,6 @@ class FxFxEWSudakovMixin:
                 else:
                     groups[b] = groups[a] | groups[b]
                     del groups[a]
-                _dbg(f"[FXFX]   clustered pair ({a},{b}) -> keep={keep}, new groups={len(groups)}")
                 continue
 
             if stop_clustering:
@@ -3724,12 +3234,6 @@ class FxFxEWSudakovMixin:
         if record_tag:
             self.fxfx_clustered_final_states.add(sorted_tag)
 
-        _dbg(f"[FXFX]   clustered sorted_tag={sorted_tag}")
-        _dbg(f"[FXFX]   final groups: {[sorted(list(g)) for g in groups]}")
-        _dbg("=" * 70)
-        _dbg("  END STAGE 2: FxFx clustering complete")
-        _dbg("=" * 70)
-        _dbg("")
         buff_event.fks_methods = fks_methods
         if return_groups:
             return buff_event, sorted_tag, groups
@@ -3865,15 +3369,11 @@ class FxFxEWSudakovMixin:
         # so density path is meaningless and we fall back to scalar at runtime anyway.
         # Generating these MEs would be wasteful and confusing.
         if not self.fxfx_clustered_decay_processes:
-            _dbg(
-                "[DENSITY_PROD_GEN] No decayed resonances found, skipping density production processes"
-            )
             return []
         # Build set of resonance PDGs that actually have decays
         decayed_resonance_pdgs = set()
         for res_pdg, decay_pdgs in self.fxfx_clustered_decay_processes:
             decayed_resonance_pdgs.add(abs(res_pdg))
-        _dbg(f"[DENSITY_PROD_GEN] Decayed resonance PDGs: {decayed_resonance_pdgs}")
         extra = []
         seen = set()
         for sorted_tag in sorted(self.fxfx_clustered_final_states):
@@ -3889,37 +3389,24 @@ class FxFxEWSudakovMixin:
         return extra
 
     def _get_fxfx_density_decay_processes(self):
-        _dbg("[DENSITY_DECAY_GEN] _get_fxfx_density_decay_processes called")
-        _dbg(
-            f"[DENSITY_DECAY_GEN]   _needs_fxfx_cluster_catalogue={self._needs_fxfx_cluster_catalogue()}"
-        )
-        _dbg(
-            f"[DENSITY_DECAY_GEN]   fxfx_clustered_decay_processes={self.fxfx_clustered_decay_processes}"
-        )
-        _dbg(f"[DENSITY_DECAY_GEN]   model={bool(self.model)}")
         if not (
             self._needs_fxfx_cluster_catalogue()
             and self.fxfx_clustered_decay_processes
             and self.model
         ):
-            _dbg("[DENSITY_DECAY_GEN]   -> Returning empty (condition not met)")
             return []
         extra = []
         seen = set()
         for res_pdg, decay_pdgs in sorted(self.fxfx_clustered_decay_processes):
             proc = self._decay_pdgs_to_process(res_pdg, decay_pdgs)
-            _dbg(f"[DENSITY_DECAY_GEN]   res_pdg={res_pdg}, decay_pdgs={decay_pdgs} -> proc={proc}")
             if not proc or proc in seen:
                 continue
             seen.add(proc)
             extra.append(proc)
-        _dbg(f"[DENSITY_DECAY_GEN]   -> Returning {len(extra)} processes: {extra}")
         return extra
 
     def _prepare_fxfx_sudakov_inputs(self, event, sud_mod, event_to_sud):
         """Prepare FxFx Sudakov inputs (kinematics + canonical ordering)."""
-        _dbg("[FXFX] _prepare_fxfx_sudakov_inputs: start")
-        _dbg(f"[FXFX]   event_to_sud particles={len(event_to_sud)}")
         frame_transform = []
 
         # Boost to CM frame if needed
@@ -3932,7 +3419,6 @@ class FxFxEWSudakovMixin:
             and (abs(p_in_sum.py) < 1e-6 * p_in_sum.E)
             and (abs(p_in_sum.pz) < 1e-6 * p_in_sum.E)
         )
-        _dbg(f"[FXFX]   boost needed={needs_boost} (p_in_sum={p_in_sum})")
         if needs_boost:
             frame_transform.append(("boost_to_cm", FourMomentum(p_in_sum)))
             event_to_sud.boost(p_in_sum)
@@ -3940,7 +3426,6 @@ class FxFxEWSudakovMixin:
         # Rotate so initial-state particle is along z-axis (matches ickkw=0 path)
         initial = copy.deepcopy(event_to_sud[0])
         if not ((abs(initial.px) < 1e-6 * initial.E) and (abs(initial.py) < 1e-6 * initial.E)):
-            _dbg(f"[FXFX]   rotating to z-axis (initial px={initial.px}, py={initial.py})")
             frame_transform.append(("rotate_to_z", FourMomentum(initial)))
             for p in event_to_sud:
                 p.set_momentum(
@@ -3958,7 +3443,6 @@ class FxFxEWSudakovMixin:
         p0.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0,  sign0 * pz_abs]))
         p1.set_momentum(lhe_parser.FourMomentum([E_in/2.0, 0.0, 0.0, -sign0 * pz_abs]))
 
-        _dbg("[FXFX]   normalizing kinematics (set_final_jet_mass_to_zero, set_initial_mass_to_zero, check_kinematics_only)")
         event_to_sud.set_final_jet_mass_to_zero()
         event_to_sud.set_initial_mass_to_zero()
         event_to_sud.check_kinematics_only()
@@ -3967,9 +3451,6 @@ class FxFxEWSudakovMixin:
 
         mapped_tag, mapped_order = event_to_sud.get_tag_and_order()
         sorted_tag = (tuple(mapped_order[0]), tuple(sorted(mapped_order[1])))
-        _dbg(f"[FXFX]   mapped_tag={mapped_tag}")
-        _dbg(f"[FXFX]   mapped_order={mapped_order}")
-        _dbg(f"[FXFX]   sorted_tag={sorted_tag}")
 
         try:
             canon = list(sud_mod.original_pdg_list_dict[sorted_tag][1])
@@ -3977,7 +3458,6 @@ class FxFxEWSudakovMixin:
             raise MissingSudakovProcessError(
                 "Sudakov library has no process %s. Generate the library from "
                 "the complete event input and xi scan." % (sorted_tag,)) from exc
-        _dbg(f"[FXFX]   canonical order={canon}")
 
         # Build permutation: perm[i] = position in canon where mapped_order[1][i] should go
         perm = []
@@ -3995,7 +3475,6 @@ class FxFxEWSudakovMixin:
         offset = len(mapped_tag[0])
         for i, target_pos in enumerate(perm):
             event_to_sud_order[target_pos + offset] = event_to_sud[i + offset]
-        _dbg(f"[FXFX]   perm={perm}")
 
         p_in = np.zeros(shape=(len(event_to_sud_order), 4))
         for i, el in enumerate(event_to_sud_order):
@@ -4005,22 +3484,12 @@ class FxFxEWSudakovMixin:
         expected_order = list(sud_mod.original_pdg_list_dict[sorted_tag][1])
         actual_order = mapped_order2[1]
         if expected_order != actual_order:
-            _dbg(
-                f"Momentum order mismatch: expected={expected_order}, actual={actual_order}, sorted_tag={sorted_tag}, mapped_order={mapped_order}, perm={perm}"
-            )
             raise RuntimeError("Order in particle momenta does not match MG convention")
-        _dbg(f"[FXFX]   momentum order VALIDATED: expected==actual={expected_order}")
 
         incoming_pdgs = list(mapped_order2[0])
         outgoing_pdgs = list(mapped_order2[1])
         iflist = [-1] * len(incoming_pdgs) + [1] * len(outgoing_pdgs)
         pdg_order = incoming_pdgs + outgoing_pdgs
-        _dbg(f"[FXFX]   incoming_pdgs={incoming_pdgs}")
-        _dbg(f"[FXFX]   outgoing_pdgs={outgoing_pdgs}")
-        _dbg(f"[FXFX]   iflist={iflist}")
-        _dbg(f"[FXFX]   pdg_order={pdg_order}")
-        _dbg(f"[FXFX]   gstr={gstr}")
-        _dbg(f"[FXFX] _prepare_fxfx_sudakov_inputs EXIT: p_in.shape={p_in.shape}, sorted_tag={sorted_tag}, iflist={iflist}, gstr={gstr:.6f}")
 
         return {
             "sorted_tag": sorted_tag,
@@ -4037,93 +3506,67 @@ class FxFxEWSudakovMixin:
 
     def _get_fxfx_ewsudpy_module(self, sud_mod, sorted_tag):
         """Return the ewsudpy module for a given sorted_tag (if available)."""
-        _dbg(f"[OVERRIDE] _get_fxfx_ewsudpy_module: sorted_tag={sorted_tag}")
         try:
             result = sud_mod.pdg2ewsud_dict.get(sorted_tag)
-            _dbg(f"[OVERRIDE]   resolved module: {result.__name__ if result is not None else None}")
             return result
-        except Exception as exc:
-            _dbg(f"[OVERRIDE]   exception fetching module: {type(exc).__name__}: {exc} -> returning None")
+        except Exception:
             return None
 
     def _set_ewsud_rij_ge_mw(self, ewsud_mod, disable_clamp):
         """Disable invariant clamping on the ewsudpy module; return previous value if set."""
-        _dbg(f"[OVERRIDE] _set_ewsud_rij_ge_mw: module={ewsud_mod.__name__ if ewsud_mod else None}, disable_clamp={disable_clamp}")
         if ewsud_mod is None:
-            _dbg("[OVERRIDE]   module is None -> returning None (no-op)")
             return None
         if hasattr(ewsud_mod, "fxfx_ignore_invariant_checks"):
             prev = getattr(ewsud_mod, "fxfx_ignore_invariant_checks")
-            _dbg(f"[OVERRIDE]   path=fxfx_ignore_invariant_checks, prev={prev}, target={disable_clamp}")
             try:
                 ewsud_mod.fxfx_ignore_invariant_checks = disable_clamp
-                _dbg(f"[OVERRIDE]   set via attribute assignment -> returning ('fxfx', {prev})")
                 return ("fxfx", prev)
-            except Exception as exc:
-                _dbg(f"[OVERRIDE]   attribute assignment failed ({type(exc).__name__}: {exc}), retrying with [...]=")
+            except Exception:
                 try:
                     ewsud_mod.fxfx_ignore_invariant_checks[...] = disable_clamp
-                    _dbg(f"[OVERRIDE]   set via array assignment -> returning ('fxfx', {prev})")
                     return ("fxfx", prev)
-                except Exception as exc2:
-                    _dbg(f"[OVERRIDE]   array assignment also failed ({type(exc2).__name__}: {exc2}), returning None")
+                except Exception:
                     return None
         if not hasattr(ewsud_mod, "rij_ge_mw"):
-            _dbg("[OVERRIDE]   module lacks BOTH fxfx_ignore_invariant_checks AND rij_ge_mw -> returning None")
             return None
         prev = getattr(ewsud_mod, "rij_ge_mw")
         value = not disable_clamp
-        _dbg(f"[OVERRIDE]   path=rij_ge_mw, prev={prev}, target={value} (= not {disable_clamp})")
         try:
             ewsud_mod.rij_ge_mw = value
-            _dbg(f"[OVERRIDE]   set via attribute assignment -> returning ('rij', {prev})")
             return ("rij", prev)
-        except Exception as exc:
-            _dbg(f"[OVERRIDE]   attribute assignment failed ({type(exc).__name__}: {exc}), retrying with [...]=")
+        except Exception:
             try:
                 ewsud_mod.rij_ge_mw[...] = value
-                _dbg(f"[OVERRIDE]   set via array assignment -> returning ('rij', {prev})")
                 return ("rij", prev)
-            except Exception as exc2:
-                _dbg(f"[OVERRIDE]   array assignment also failed ({type(exc2).__name__}: {exc2}), returning None")
+            except Exception:
                 return None
 
     def _restore_ewsud_rij_ge_mw(self, ewsud_mod, prev):
         """Restore invariant-clamp setting on the ewsudpy module if it was set."""
-        _dbg(f"[OVERRIDE] _restore_ewsud_rij_ge_mw: module={ewsud_mod.__name__ if ewsud_mod else None}, prev={prev}")
         if prev is None or ewsud_mod is None:
-            _dbg("[OVERRIDE]   prev is None or module is None -> nothing to restore")
             return
         kind = "rij"
         value = prev
         if isinstance(prev, tuple) and len(prev) == 2:
             kind, value = prev
-        _dbg(f"[OVERRIDE]   kind={kind}, value to restore={value}")
         if kind == "fxfx" and hasattr(ewsud_mod, "fxfx_ignore_invariant_checks"):
             try:
                 ewsud_mod.fxfx_ignore_invariant_checks = value
-                _dbg(f"[OVERRIDE]   restored fxfx_ignore_invariant_checks={value} via attribute assignment")
-            except Exception as exc:
-                _dbg(f"[OVERRIDE]   attribute restore failed ({type(exc).__name__}: {exc}), retrying with [...]=")
+            except Exception:
                 try:
                     ewsud_mod.fxfx_ignore_invariant_checks[...] = value
-                    _dbg(f"[OVERRIDE]   restored fxfx_ignore_invariant_checks={value} via array assignment")
-                except Exception as exc2:
-                    _dbg(f"[OVERRIDE]   array restore also failed ({type(exc2).__name__}: {exc2}) -- leaving as-is")
+                except Exception:
+                    pass
             return
         if not hasattr(ewsud_mod, "rij_ge_mw"):
-            _dbg("[OVERRIDE]   module lacks rij_ge_mw -> nothing to restore")
             return
         try:
             ewsud_mod.rij_ge_mw = value
-            _dbg(f"[OVERRIDE]   restored rij_ge_mw={value} via attribute assignment")
-        except Exception as exc:
-            _dbg(f"[OVERRIDE]   attribute restore failed ({type(exc).__name__}: {exc}), retrying with [...]=")
+        except Exception:
             try:
                 ewsud_mod.rij_ge_mw[...] = value
-                _dbg(f"[OVERRIDE]   restored rij_ge_mw={value} via array assignment")
-            except Exception as exc2:
-                _dbg(f"[OVERRIDE]   array restore also failed ({type(exc2).__name__}: {exc2}) -- leaving as-is")
+            except Exception:
+                pass
 
     def _is_2to1_topology(self, clustered_event):
         """Check if clustered event is 2→1 (2 initial, 1 final state particle).
@@ -4134,7 +3577,6 @@ class FxFxEWSudakovMixin:
         n_initial = sum(1 for p in clustered_event if p.status == -1)
         n_final = sum(1 for p in clustered_event if p.status == 1)
         is_2to1 = n_initial == 2 and n_final == 1
-        _dbg(f"[2TO1] _is_2to1_topology: n_init={n_initial}, n_final={n_final} -> is_2to1={is_2to1}")
         return is_2to1
 
     def _has_small_invariants(self, p_in, iflist, mw2=None):
@@ -4154,7 +3596,6 @@ class FxFxEWSudakovMixin:
             mw2 = MW_POLE**2
 
         nlegs = len(iflist)
-        _dbg(f"[SMALLINV] _has_small_invariants ENTER: nlegs={nlegs}, iflist={list(iflist)}, mw2={mw2:.3g}")
         for i in range(nlegs):
             for j in range(i + 1, nlegs):
                 sign = float(iflist[i] * iflist[j])
@@ -4163,11 +3604,8 @@ class FxFxEWSudakovMixin:
                 py = p_in[i][2] + sign * p_in[j][2]
                 pz = p_in[i][3] + sign * p_in[j][3]
                 sij = e * e - px * px - py * py - pz * pz
-                _dbg(f"[SMALLINV]   pair({i},{j}) sign={sign:+.0f}: s_ij={sij:.3g}, |s_ij|/MW²={abs(sij)/mw2:.3f}")
                 if abs(sij) < mw2:
-                    _dbg(f"[SMALLINV]   HIT: |s({i},{j})|={abs(sij):.1f} < MW²={mw2:.1f} -> returning True")
                     return True
-        _dbg(f"[SMALLINV] _has_small_invariants EXIT: all {nlegs*(nlegs-1)//2} pairs above MW² -> returning False")
         return False
 
     # FxFx applies the invariant cut before evaluating these three variants.
@@ -4283,30 +3721,22 @@ class FxFxEWSudakovMixin:
 
     def _compute_ewsudakov_fxfx_reweight(self, event, sud_mod):
         """FxFx-aware scalar Sudakov reweighting."""
-        _dbg("=" * 70)
-        _dbg(f"[SCALAR] _compute_ewsudakov_fxfx_reweight ENTER: event_id={CURRENT_EVENT_ID}, npart={len(event)}, event.wgt={event.wgt}")
         self._init_pole_masses_from_banner()
         # PASS-THROUGH: 2→1 raw topology (qq̄ → resonance, no real radiation) —
         # nothing to cluster, no Sudakov logs valid. Must fire BEFORE the cluster
-        # call so we never fall back to the legacy ickkw==0 _compute_ewsudakov_reweight
+        # call so we never fall back to the ickkw==0 _compute_ewsudakov_reweight
         # (which lacks the 2→1 guard and the 3-NLL-variants / ξ-scan output schema).
         n_init  = sum(1 for p in event if p.status == -1)
         n_final = sum(1 for p in event if p.status ==  1)
-        _dbg(f"[SCALAR] raw event topology: n_init={n_init}, n_final={n_final} (total={len(event)})")
         if n_init == 2 and n_final == 1:
-            _dbg(f"[2TO1] -> RAW 2→1 PASSTHROUGH (no clustering needed, no Sudakov), event_id={CURRENT_EVENT_ID}")
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
-        _dbg("[SCALAR] calling _cluster_fxfx_event(event, record_tag=True)...")
         cluster_result = self._cluster_fxfx_event(event, record_tag=True)
-        _dbg(f"[SCALAR]   cluster_result = {'EMPTY/None' if not cluster_result else f'OK ({len(cluster_result[0])} particles in event_to_sud)'}")
         if not cluster_result:
-            _dbg("[FALLBACK] No clustering information: evaluating the unclustered event")
             _count_fks_event("events_legacy_fallback")
             if FKS_FALLBACK_POLICY == "unit_weight":
                 # Clustering itself failed, so the method history is not
                 # available; the conservative policy demotes these events too.
-                _dbg("[POLICY] clustering failed and policy=unit_weight -> 3×1.0")
                 _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
             return self._compute_ewsudakov_reweight(event, sud_mod)
@@ -4320,91 +3750,56 @@ class FxFxEWSudakovMixin:
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
             _count_fks_event("events_with_fsr_fallback")
             if FKS_FALLBACK_POLICY == "unit_weight":
-                _dbg(f"[POLICY] FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
                 _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology after clustering (e.g. a single hard parton
-        # merged back into the initial state). Kept as belt-and-suspenders for
+        # merged back into the initial state): a belt-and-suspenders check for
         # cases where clustering reduces a multi-parton event to 2→1.
-        _dbg(f"[SCALAR] checking post-cluster topology on event_to_sud ({len(event_to_sud)} parts)")
         if self._is_2to1_topology(event_to_sud):
-            _dbg(f"[2TO1] -> POST-CLUSTER 2→1 PASSTHROUGH, returning weight=1 for all 3 variants (event_id={CURRENT_EVENT_ID})")
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
-        _dbg("[SCALAR] calling _prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)...")
         try:
             prep = self._prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)
         except RuntimeError:
-            _dbg("[FATAL] _prepare_fxfx_sudakov_inputs: order in particle momenta does not match MG convention -> exit(3)")
             sys.exit(3)
 
-        _dbg(f"[SCALAR] _prepare returned OK: sorted_tag={prep['sorted_tag']}, iflist={list(prep['iflist'])}, p_in.shape={prep['p_in'].shape}, gstr={prep['gstr']:.6f}")
-
         # PASS-THROUGH: Small invariants (event too soft for Sudakov)
-        # This SMALL_INV check is what makes the Fortran rij_ge_mw clamp inert,
-        # which in turn is why we no longer emit the both_off / rij_ge_mw_off
-        # variants — they would be algebraically forced to coincide with
-        # s_to_rij_off / central respectively.
-        _dbg("[SCALAR] checking small invariants on p_in...")
+        # This SMALL_INV check makes the Fortran rij_ge_mw clamp inert, so the
+        # both_off / rij_ge_mw_off variants would coincide with s_to_rij_off /
+        # central respectively; they are not emitted.
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
-            _dbg(f"[FALLBACK] SMALL INVARIANT (s_ij < MW²) -> passthrough, returning 3×1.0 (event_id={CURRENT_EVENT_ID})")
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # Compute Sudakov and build reweight dictionary
         rij_override_mod = None
         rij_override_prev = None
         _ignore_invs = getattr(self, "fxfx_ignore_invariant_checks", False)
-        _dbg(f"[OVERRIDE] self.fxfx_ignore_invariant_checks = {_ignore_invs}")
         if _ignore_invs:
             rij_override_mod = self._get_fxfx_ewsudpy_module(sud_mod, prep["sorted_tag"])
             rij_override_prev = self._set_ewsud_rij_ge_mw(rij_override_mod, False)
-            _dbg(f"[OVERRIDE]   applied: mod={rij_override_mod.__name__ if rij_override_mod else None}, prev={rij_override_prev}")
-        _dbg(f"[5SUD] calling sud_mod.ewsudakov(sorted_tag={prep['sorted_tag']}, p_in.shape={prep['p_in'].shape}, gstr={prep['gstr']:.6f})")
         try:
             res = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
         finally:
             if rij_override_prev is not None:
-                _dbg(f"[OVERRIDE]   restoring rij_ge_mw via prev={rij_override_prev}")
                 self._restore_ewsud_rij_ge_mw(rij_override_mod, rij_override_prev)
 
-        _dbg(f"[5SUD] Fortran returned res[0..5] = [{res[0]:.6e}, {res[1]:.6e}, {res[2]:.6e}, {res[3]:.6e}, {res[4]:.6e}, {res[5]:.6e}]")
-        _dbg(f"[5SUD] Born check: |res[0]| = {abs(res[0]):.3e} (threshold 1e-30)")
-        # Three NLL variants now propagated (down from five). Fortran still returns
-        # res[1..5]; we drop res[4] (both_off) and res[5] (rij_ge_mw_off) because
-        # the SMALL_INV pre-filter forces res[4]==res[3] and res[5]==res[2].
+        # Three NLL variants are propagated. Fortran returns res[0..5]; res[4]
+        # (both_off) and res[5] (rij_ge_mw_off) are not used because the
+        # SMALL_INV pre-filter forces res[4]==res[3] and res[5]==res[2].
         # res[0]=Born, res[1]=LL, res[2]=central, res[3]=s_to_rij_off.
         if abs(res[0]) > 1e-30:
-            _dbg(f"[5SUD] Born is non-zero -> normalizing 3 variants by Born={res[0]:.6e}")
             sudrats = [
                 1.0 + res[2] / res[0],   # central
                 1.0 + res[3] / res[0],   # s_to_rij_off
                 1.0 + res[1] / res[0],   # LL
             ]
-            _dbg(f"[5SUD]   sudrats[0] central      = 1 + res[2]/res[0] = 1 + {res[2]:.3e}/{res[0]:.3e} = {sudrats[0]:.6f}")
-            _dbg(f"[5SUD]   sudrats[1] s_to_rij_off = 1 + res[3]/res[0] = 1 + {res[3]:.3e}/{res[0]:.3e} = {sudrats[1]:.6f}")
-            _dbg(f"[5SUD]   sudrats[2] LL           = 1 + res[1]/res[0] = 1 + {res[1]:.3e}/{res[0]:.3e} = {sudrats[2]:.6f}")
-            # Sanity check that the dropped variants would have been degenerate
-            # (visible only when the kernel actually clamped, which it shouldn't
-            # given the SMALL_INV pre-filter — log if it ever isn't).
-            _dropped_both_off      = 1.0 + res[4] / res[0]
-            _dropped_rij_ge_mw_off = 1.0 + res[5] / res[0]
-            if abs(_dropped_both_off - sudrats[1]) > 1e-12 or abs(_dropped_rij_ge_mw_off - sudrats[0]) > 1e-12:
-                _dbg(f"[5SUD]   ⚠️  DROPPED VARIANTS WERE NOT DEGENERATE: dropped_both_off={_dropped_both_off:.6f} (expected ≡ sudrats[1]={sudrats[1]:.6f}), dropped_rij_ge_mw_off={_dropped_rij_ge_mw_off:.6f} (expected ≡ sudrats[0]={sudrats[0]:.6f}) — SMALL_INV filter may have a hole or rij_ge_mw clamp engaged unexpectedly")
         else:
-            _dbg(f"[5SUD] WARNING: Born |res[0]|={abs(res[0]):.3e} < 1e-30 -> setting all 3 sudrats to 1.0 (no reweight)")
             sudrats = [1.0] * 3
 
         sudrats = limit_sudakov_factors(sudrats, "events_runaway_damped_scalar")
 
         # Final output (matching density path format)
-        _dbg("-" * 70)
-        _dbg(f"[SCALAR] FINAL WEIGHTS (scalar FxFx): " +
-             ", ".join(f"{n}={v:.6f}" for n, v in zip(self.SUDAKOV_VARIANT_NAMES, sudrats)))
-        _dbg(f"[SCALAR] event_id={CURRENT_EVENT_ID}, event.wgt={event.wgt}")
-        _dbg(f"[SCALAR] reweighted (central) = {event.wgt} × {sudrats[0]:.6f} = {event.wgt * sudrats[0]:.6e}")
-        _dbg("=" * 70)
-        _dbg(f"[SCALAR] _compute_ewsudakov_fxfx_reweight EXIT: passing sudrats={sudrats} to _build_sudakov_rwgt_dict")
         return self._build_sudakov_rwgt_dict(event, sudrats)
 
     def _compute_density_ewsudakov_reweight(self, event, sud_mod):
@@ -4428,9 +3823,6 @@ class FxFxEWSudakovMixin:
         5. Apply Sudakov per helicity: M^EWSL_h = M_h * (1 + delta_h)
         6. Compute weight: w = <B^EWSL, C> / <B, C> (DensityMatrix.contract)
 
-        Options (set via self attributes):
-        - density_verbose: Enable verbose logging (default: False)
-
         Args:
             event: LHE event object
             sud_mod: Sudakov module with amplitude evaluation
@@ -4439,40 +3831,27 @@ class FxFxEWSudakovMixin:
             Dict with reweight information including 'orig' and Sudakov-weighted entries
         """
         self._init_pole_masses_from_banner()
-        _dbg("=" * 70)
-        _dbg(f"EVENT NUMBER: {CURRENT_EVENT_ID}")
-        _dbg("ENTERING _compute_density_ewsudakov_reweight")
-        _dbg("Event weight:", event.wgt)
-        _dbg("Event particles:")
-        for i, p in enumerate(event):
-            _dbg(
-                f"  [{i}] pdg={p.pid:>4}, status={p.status:>2}, E={p.E:.4f}, px={p.px:.4f}, py={p.py:.4f}, pz={p.pz:.4f}"
-            )
-        _dbg("-" * 70)
 
-        # Initialize logger for diagnostics
+        # Processed-event counter
         density_logger = getattr(self, "_density_logger", None)
         if density_logger is None:
-            density_logger = DensitySudakovLogger(verbose=getattr(self, "density_verbose", True))  # default flipped True 2026-06-19 (full debug; revert with the file)
+            density_logger = DensitySudakovLogger()
             self._density_logger = density_logger
 
         # PASS-THROUGH: 2→1 raw topology (qq̄ → resonance, no real radiation) —
         # nothing to cluster, no Sudakov logs valid. Must fire BEFORE the cluster
-        # call so we never fall back to the legacy ickkw==0 _compute_ewsudakov_reweight
-        # (which lacks the 2→1 guard and the 5-NLL-variants / ξ-scan output schema).
+        # call so we never fall back to the ickkw==0 _compute_ewsudakov_reweight
+        # (which lacks the 2→1 guard and the 3-NLL-variants / ξ-scan output schema).
         n_init  = sum(1 for p in event if p.status == -1)
         n_final = sum(1 for p in event if p.status ==  1)
         if n_init == 2 and n_final == 1:
-            _dbg("  -> RAW 2→1 TOPOLOGY (pre-cluster), returning weight=1 pass-through")
             density_logger.log_event("passthrough_2to1_raw", [], 0, 1.0)
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # Step 1: Cluster event (same as FxFx path)
-        _dbg("Step 1: Clustering event (FxFx)...")
         cluster_result = self._cluster_fxfx_event(event, record_tag=True, return_groups=True)
         if not cluster_result:
             # Evaluate the scalar path when clustering information is unavailable.
-            _dbg("  -> NO CLUSTERING INFO, falling back to FxFx scalar path")
             density_logger.log_event("fallback_no_cluster", [], 0, 1.0)
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
@@ -4484,47 +3863,29 @@ class FxFxEWSudakovMixin:
         if any(m not in FKS_SUCCESS_METHODS for m in _fks_hist):
             _count_fks_event("events_with_fsr_fallback_density")
             if FKS_FALLBACK_POLICY == "unit_weight":
-                _dbg(f"  -> FSR fallback in clustering history {_fks_hist} and policy=unit_weight -> 3×1.0")
                 _count_fks_event("events_unit_weight_by_policy")
                 return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
         # PASS-THROUGH: 2→1 topology (event too soft for Sudakov)
         if self._is_2to1_topology(clustered_event):
-            _dbg("  -> 2→1 TOPOLOGY, returning weight=1 pass-through")
             density_logger.log_event("passthrough_2to1", [], 0, 1.0)
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
-        _dbg("  -> Clustered event particles:")
-        for i, p in enumerate(clustered_event):
-            _dbg(f"     [{i}] pdg={p.pid:>4}, status={p.status:>2}, E={p.E:.4f}")
-
-        # Diagnostic: check for unphysical kinematics
+        # Check for degenerate beam kinematics
         incoming = [p for p in clustered_event if p.status < 0]
         if len(incoming) >= 2:
             E1, E2 = incoming[0].E, incoming[1].E
             pz1, pz2 = incoming[0].pz, incoming[1].pz
             s_hat = (E1 + E2) ** 2 - (pz1 + pz2) ** 2  # assuming px=py=0 for beams
-            _dbg(
-                f"  -> KINEMATICS CHECK: E1={E1:.2f}, E2={E2:.2f}, sqrt(s_hat)={abs(s_hat)**0.5:.2f} GeV"
-            )
-            if E1 < 0 or E2 < 0:
-                _dbg(f"*** WARNING: NEGATIVE BEAM ENERGY! E1={E1:.2f}, E2={E2:.2f} ***")
-            if s_hat < 0:
-                _dbg(f"*** WARNING: SPACELIKE s_hat! s_hat={s_hat:.2f} GeV^2 ***")
 
             # FALLBACK: Degenerate kinematics - cannot boost to CM frame
             # This happens when clustering produces a light-like final state (single on-shell photon)
             # where one beam has zero energy. Cannot compute density matrices in this frame.
             if E1 < 1e-6 or E2 < 1e-6 or s_hat < 1.0:  # s_hat < 1 GeV² is effectively massless
-                _dbg(
-                    "  -> DEGENERATE KINEMATICS (light-like system), falling back to scalar FxFx path"
-                )
                 return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         # Step 2: Identify resonances in clustered event
-        _dbg("Step 2: Identifying resonances...")
         resonances = ResonanceIdentifier.find_resonances(clustered_event)
-        _dbg(f"  -> Found {len(resonances)} candidate resonances: {resonances}")
 
         # Filter out "resonances" that weren't actually clustered (singleton groups)
         # A true resonance must have decay products that merged into it
@@ -4532,11 +3893,7 @@ class FxFxEWSudakovMixin:
         resonances = [
             (idx, pdg) for idx, pdg in resonances if idx < len(groups) and len(groups[idx]) > 1
         ]
-        _dbg(
-            f"  -> After filtering non-clustered: {len(resonances)} actual resonances: {resonances}"
-        )
 
-        res_indices = [r[0] for r in resonances]
         res_pdgs = [r[1] for r in resonances]
         res_dims = [SPIN_DIMS[abs(pdg)] for pdg in res_pdgs]
         total_dim = 1
@@ -4544,9 +3901,6 @@ class FxFxEWSudakovMixin:
             total_dim *= d
         if not resonances:
             total_dim = 0
-        _dbg(
-            f"  -> res_indices={res_indices}, res_pdgs={res_pdgs}, res_dims={res_dims}, total_dim={total_dim}"
-        )
 
         # FALLBACK: If no resonances found, use scalar path
         # This happens when:
@@ -4554,7 +3908,6 @@ class FxFxEWSudakovMixin:
         # 2. Stable particles with resonance PDGs but no clustering (e.g., ttH with stable tops)
         # The density matrix formalism requires at least one true resonance with decay products
         if not resonances:
-            _dbg("  -> NO RESONANCES found, falling back to scalar FxFx path")
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         # The generated dispatcher/Fortran density kernel uses fixed buffers:
@@ -4578,42 +3931,14 @@ class FxFxEWSudakovMixin:
                 _DIM_OVERFLOW_WARNED = True
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
-        # Step 2b: Define B and C from clustering history (no density evaluation yet)
-        _dbg("Step 2b: Defining B/C per event from clustering history...")
-
-        def _pdg_label(pdg):
-            name = self._pdg_to_model_name(pdg)
-            return name if name else str(pdg)
-
-        def _format_lhe_list(lhe_indices):
-            formatted = []
-            for lhe_idx in lhe_indices:
-                if lhe_idx < 1 or lhe_idx > len(event):
-                    continue
-                particle = event[lhe_idx - 1]
-                pdg_val = int(getattr(particle, "pid", 0))
-                formatted.append(f"{lhe_idx}({_pdg_label(pdg_val)})")
-            return ", ".join(formatted) if formatted else "none"
-
-        B_def = {
-            "cluster_sorted_tag": cluster_sorted_tag,
-            "resonances": [],
-        }
+        # Step 2b: Define C from clustering history (no density evaluation yet)
         C_def = []
         for res_idx, res_pdg in resonances:
             if res_idx >= len(groups):
                 msg = f"Resonance index {res_idx} (pdg={res_pdg}) out of groups range (len={len(groups)}), skipping"
                 warnings.warn(msg, RuntimeWarning)
-                _dbg(f"  -> {msg}")
                 continue
             group_lhe = sorted(groups[res_idx])
-            B_def["resonances"].append(
-                {
-                    "cluster_idx": res_idx,
-                    "pdg": res_pdg,
-                    "group_lhe": group_lhe,
-                }
-            )
 
             decay_lhe = []
             decay_pdgs = []
@@ -4634,101 +3959,17 @@ class FxFxEWSudakovMixin:
                 }
             )
 
-        # Print B definition ONCE (the full production process)
-        incoming_names = [
-            _pdg_label(pdg) for pdg in (cluster_sorted_tag[0] if cluster_sorted_tag else [])
-        ]
-        outgoing_names = [
-            _pdg_label(pdg) for pdg in (cluster_sorted_tag[1] if cluster_sorted_tag else [])
-        ]
-        incoming_str = " ".join(incoming_names) if incoming_names else "?"
-        outgoing_str = " ".join(outgoing_names) if outgoing_names else "?"
-        res_indices_str = ", ".join(
-            [f"{r['pdg']}@idx{r['cluster_idx']}" for r in B_def["resonances"]]
-        )
-        _dbg(f"  -> B (production): {incoming_str} -> {outgoing_str}")
-        _dbg(f"     resonance legs: [{res_indices_str}]")
-
-        # Print each C definition (one per resonance decay)
-        for c_entry in C_def:
-            res_name = _pdg_label(c_entry["res_pdg"])
-            decay_str = _format_lhe_list(c_entry["decay_lhe"])
-            decay_names = (
-                " ".join([_pdg_label(pdg) for pdg in c_entry["decay_pdgs"]])
-                if c_entry["decay_pdgs"]
-                else "(none)"
-            )
-            group_lhe = sorted(groups[c_entry["res_cluster_idx"]])
-            group_str = _format_lhe_list(group_lhe)
-            _dbg(f"  -> C[{res_name}] (decay): {res_name} -> {decay_names}")
-            _dbg(f"     group LHE=[{group_str}], decay LHE=[{decay_str}]")
-
         self._density_last_C_def = C_def
 
         # Step 3: Prepare kinematics (same standardization as FxFx)
-        _dbg("Step 3: Preparing kinematics...")
         event_to_sud = clustered_event
         try:
             prep = self._prepare_fxfx_sudakov_inputs(event, sud_mod, event_to_sud)
-            _dbg(f"  -> sorted_tag: {prep['sorted_tag']}")
-            _dbg(f"  -> gstr (alpha_s): {prep['gstr']}")
-            _dbg(
-                f"  -> p_in shape: {prep['p_in'].shape if hasattr(prep['p_in'], 'shape') else 'N/A'}"
-            )
-            _dbg("  -> Momenta (p_in):")
-            for i, mom in enumerate(prep["p_in"]):
-                _dbg(
-                    f"     p[{i}] = [{mom[0]:12.4f}, {mom[1]:12.4f}, {mom[2]:12.4f}, {mom[3]:12.4f}]"
-                )
-            if DEBUG and "iflist" in prep and "pdg_order" in prep:
-
-                def _sumdot(pi, pj, sign):
-                    # Match Fortran Source/kin_functions.f::SumDot = (pi + sign·pj)²
-                    # (= m_i² + m_j² + sign·2·(pi·pj)). Including mass terms is
-                    # required for consistency with the kernel's rij_ge_mw clamp.
-                    e  = pi[0] + sign * pj[0]
-                    px = pi[1] + sign * pj[1]
-                    py = pi[2] + sign * pj[2]
-                    pz = pi[3] + sign * pj[3]
-                    return e * e - px * px - py * py - pz * pz
-
-                mw = getattr(sud_mod, "mdl_mw", None)
-                if mw is None and self.model:
-                    param_dict = self.model.get("parameter_dict") or {}
-                    mw = param_dict.get("MW", param_dict.get("mdl_MW"))
-                try:
-                    mw = float(mw) if mw is not None else None
-                except (TypeError, ValueError):
-                    mw = None
-                mw2 = mw * mw if mw is not None else None
-
-                iflist = prep["iflist"]
-                pdg_order = prep["pdg_order"]
-                nlegs = len(iflist)
-                min_abs = None
-                _dbg("  -> Sudakov invariants (sumdot):")
-                for i in range(nlegs):
-                    for j in range(i, nlegs):
-                        sign = float(iflist[i] * iflist[j])
-                        sij = _sumdot(prep["p_in"][i], prep["p_in"][j], sign)
-                        abs_sij = abs(sij)
-                        if min_abs is None or abs_sij < min_abs:
-                            min_abs = abs_sij
-                        tag = ""
-                        if mw2 is not None and abs_sij < mw2:
-                            tag = f" (< MW^2={mw2:.6e})"
-                        _dbg(
-                            f"     ({i+1},{j+1}) pdg=({pdg_order[i]},{pdg_order[j]}) s_ij={sij:.6e}{tag}"
-                        )
-                if mw2 is not None and min_abs is not None:
-                    _dbg(f"     min|s_ij|={min_abs:.6e}, MW^2={mw2:.6e}")
         except RuntimeError:
-            _dbg("  -> RuntimeError: momentum order mismatch!")
             sys.exit(3)
 
         # PASS-THROUGH: Small invariants (event too soft for Sudakov)
         if self._has_small_invariants(prep["p_in"], prep["iflist"]):
-            _dbg("  -> SMALL INVARIANT (s_ij < MW²), returning weight=1 pass-through")
             density_logger.log_event("passthrough_small_sij", resonances, total_dim, 1.0)
             return self._build_sudakov_rwgt_dict(event, [1.0, 1.0, 1.0])
 
@@ -4736,8 +3977,6 @@ class FxFxEWSudakovMixin:
         weight_var = None  # Initialize variation weight (computed in density path only)
         try:
             # Standard Sudakov evaluation on clustered event
-            _dbg("Step 4-5: Evaluating Sudakov corrections...")
-            _dbg(f"  -> has density_sudakov attr: {hasattr(sud_mod, 'density_sudakov')}")
             use_density_path = False
 
             if hasattr(sud_mod, "density_sudakov") and resonances:
@@ -4761,11 +4000,6 @@ class FxFxEWSudakovMixin:
                             fortran_idx = canonical_idx + 1  # 1-based indexing for Fortran
                         res_indices_fortran.append(fortran_idx)
 
-                    _dbg("  -> Calling density_sudakov with:")
-                    _dbg(f"     sorted_tag: {prep['sorted_tag']}")
-                    _dbg(f"     res_indices_fortran: {res_indices_fortran}")
-                    _dbg(f"     res_dims: {res_dims}")
-
                     # Call density matrix Sudakov (FxFx override can disable MW^2 clamping)
                     rij_override_mod = None
                     rij_override_prev = None
@@ -4774,10 +4008,6 @@ class FxFxEWSudakovMixin:
                             sud_mod, prep["sorted_tag"]
                         )
                         rij_override_prev = self._set_ewsud_rij_ge_mw(rij_override_mod, False)
-                        if rij_override_prev is not None:
-                            _dbg("  -> FXFX override: rij_ge_mw disabled")
-                        else:
-                            _dbg("  -> FXFX override requested but rij_ge_mw not settable")
                     try:
                         density_result = sud_mod.density_sudakov(
                             prep["sorted_tag"],
@@ -4790,23 +4020,11 @@ class FxFxEWSudakovMixin:
                         if rij_override_prev is not None:
                             self._restore_ewsud_rij_ge_mw(rij_override_mod, rij_override_prev)
 
-                    _dbg("  -> Fortran returned (from density_matrix_wrapper.f):")
-                    _dbg(f"     density_delta (per-hel Sudakov): {density_result['density_delta']}")
-                    _dbg(
-                        f"     born_diag (for helicity order check): {density_result['born_diag']}"
-                    )
-                    _dbg(
-                        f"     results[0] (scalar_born, IDEN-averaged): {density_result['results'][0] if len(density_result['results']) > 0 else 'N/A'}"
-                    )
-                    _dbg(
-                        f"     total_dim: {density_result['total_dim']}, nres: {density_result['nres']}"
-                    )
-
                     # =========================================================
                     # Compute B matrix via DensityHelper (Python/standalone)
                     # =========================================================
-                    # The Fortran wrapper returns zeros for density_born (Phase 1 removed).
-                    # B matrix is computed via DensityHelper using the standalone
+                    # The Fortran wrapper returns zeros for density_born. The B
+                    # matrix is computed via DensityHelper using the standalone
                     # density_prod modules which have working GET_DENSITY.
                     # =========================================================
                     total_dim = density_result["total_dim"]
@@ -4815,7 +4033,6 @@ class FxFxEWSudakovMixin:
                     if getattr(self, "density_prod_id_to_path", None) and getattr(
                         self, "density_prod_f2pylib", None
                     ):
-                        _dbg("  -> Computing B matrix via DensityHelper (standalone density_prod)")
                         try:
                             helper = DensityHelper(
                                 self, self.density_prod_id_to_path, self.density_prod_f2pylib
@@ -4825,14 +4042,8 @@ class FxFxEWSudakovMixin:
                             )
                             if B_matrix is not None:
                                 B = DensityMatrix.from_full_matrix(B_matrix, res_pdgs)
-                                _dbg(f"     DensityHelper returned B with shape {B_matrix.shape}")
-                            else:
-                                _dbg("     DensityHelper returned None for B matrix")
-                        except Exception as exc:
-                            _dbg(f"     DensityHelper FAILED: {exc}")
-                            import traceback
-
-                            _dbg(f"     Traceback: {traceback.format_exc()}")
+                        except Exception:
+                            pass
 
                     if B is None:
                         raise ValueError(
@@ -4859,30 +4070,6 @@ class FxFxEWSudakovMixin:
                     born_diag_fortran = np.array(
                         [born_diag_fortran_raw[_hel_perm[i]] for i in range(len(born_diag_fortran_raw))]
                     )
-                    _dbg("=" * 70)
-                    _dbg("===== DENSITY PATH =====")
-                    _dbg("=" * 70)
-                    _dbg("  -> DENSITY PATH active")
-                    _dbg(f"     B matrix shape: {B.matrix.shape}, trace: {B.trace():.6e}")
-                    scalar_born = (
-                        density_result["results"][0] if len(density_result["results"]) > 0 else None
-                    )
-                    _dbg("     B matrix (from DensityHelper):")
-                    # Use scientific notation to show small values properly
-                    with np.printoptions(
-                        precision=4,
-                        linewidth=120,
-                        formatter={"complex_kind": lambda x: f"{x.real:+.4e}{x.imag:+.4e}j"},
-                    ):
-                        for row_idx, row in enumerate(B.matrix):
-                            _dbg(f"       [{row_idx}] {row}")
-
-                    # B diagonal for delta normalization
-                    born_diag_from_B = np.real(np.diag(B.matrix))
-                    _dbg(f"     B diagonal (for delta normalization): {born_diag_from_B}")
-                    _dbg(f"     delta_unnorm (Fortran raw ordering): {delta_raw}")
-                    _dbg(f"     delta_unnorm (reordered to Python): {delta}")
-                    _dbg(f"     hel_perm (Fortran->Python): {_hel_perm}")
 
                     # =========================================================
                     # Normalize Fortran delta using per-helicity Born from Fortran
@@ -4891,33 +4078,7 @@ class FxFxEWSudakovMixin:
                     # Both are /IDEN, so IDEN cancels in the ratio:
                     #   delta_normalized = density_delta[h] / born_diag[h]
                     # =========================================================
-                    _dbg(f"     born_diag_fortran (per-hel Born, /IDEN): {born_diag_fortran}")
-                    # =========================================================
-                    # NORMALIZATION CROSS-CHECK
-                    # =========================================================
-                    # born_diag_fortran[h] = per-resonance-helicity Born summed
-                    #   over spectator helicities, from sborn_onehel() in the
-                    #   NLO Sudakov wrapper. Each element is |M|^2/IDEN for the
-                    #   subset of full helicities matching resonance-helicity h.
-                    # scalar_born = total Born from sborn(), also /IDEN, summed
-                    #   over ALL helicities.
-                    # Since the per-helicity Born partitions the total Born:
-                    #   sum_h(born_diag_fortran[h]) == scalar_born
-                    # A ratio != 1.0 would indicate a bug in the helicity
-                    # partitioning or in the resonance-helicity selection filter.
-                    # =========================================================
-                    if scalar_born is not None and scalar_born != 0:
-                        born_sum = sum(born_diag_fortran)
-                        born_ratio = born_sum / scalar_born
-                        _dbg(f"     NORMALIZATION CROSS-CHECK (born_diag_fortran vs scalar_born):")
-                        _dbg(f"       sum(born_diag_fortran) = {born_sum:.6e}  "
-                             f"(per-hel Born summed over resonance helicities)")
-                        _dbg(f"       scalar_born            = {scalar_born:.6e}  "
-                             f"(total Born from sborn(), same Fortran module)")
-                        _dbg(f"       ratio = {born_ratio:.6f}  (expect 1.0: "
-                             f"both from same sborn_onehel, IDEN cancels)")
                     if np.any(np.abs(delta) > 1e-30):
-                        _dbg("     Normalizing delta using per-helicity Born from Fortran (IDEN-free)")
                         delta_normalized = np.zeros_like(delta)
                         for h in range(len(delta)):
                             if abs(born_diag_fortran[h]) > 1e-30:
@@ -4925,7 +4086,6 @@ class FxFxEWSudakovMixin:
                             else:
                                 delta_normalized[h] = 0.0
                         delta = delta_normalized
-                        _dbg(f"     Normalized delta: {delta}")
                         # Also normalize delta_var if present
                         if delta_var is not None and np.any(np.abs(delta_var) > 1e-30):
                             delta_var_normalized = np.zeros_like(delta_var)
@@ -4935,28 +4095,6 @@ class FxFxEWSudakovMixin:
                                 else:
                                     delta_var_normalized[h] = 0.0
                             delta_var = delta_var_normalized
-                            _dbg(f"     Normalized delta_var: {delta_var}")
-                    else:
-                        _dbg("     NOTE: delta is all zeros from Fortran - no normalization needed")
-
-                    # Build full delta matrix for debug visualization
-                    dim = len(delta)
-                    delta_full = np.zeros((dim, dim), dtype=complex)
-                    for h in range(dim):
-                        for hp in range(dim):
-                            delta_full[h, hp] = delta[h] + np.conj(delta[hp])
-                    _dbg(f"     delta_full ({dim}x{dim} matrix):")
-                    with np.printoptions(
-                        precision=4,
-                        linewidth=120,
-                        formatter={"complex_kind": lambda x: f"{x.real:+.4e}{x.imag:+.4e}j"},
-                    ):
-                        for row_idx, row in enumerate(delta_full):
-                            _dbg(f"       [{row_idx}] {row}")
-                    if not np.any(np.abs(delta) > 1e-30):
-                        _dbg(
-                            "     NOTE: delta is all zeros; verify density_matrix_wrapper and PDG list wiring."
-                        )
 
                     # Get decay density matrix
                     C = self._get_decay_density_matrix(
@@ -4966,55 +4104,16 @@ class FxFxEWSudakovMixin:
                         frame_transform=prep.get("frame_transform"),
                     )
                     if C is not None:
-                        _dbg("=" * 70)
-                        _dbg("     DECAY DENSITY MATRIX C")
-                        _dbg("=" * 70)
-                        _dbg(f"     C matrix shape: {C.matrix.shape}, trace: {C.trace():.6e}")
-                        _dbg("     C matrix (complex):")
-                        with np.printoptions(
-                            precision=4,
-                            linewidth=120,
-                            formatter={"complex_kind": lambda x: f"{x.real:+.4e}{x.imag:+.4e}j"},
-                        ):
-                            for row_idx, row in enumerate(C.matrix):
-                                _dbg(f"       [{row_idx}] {row}")
-                        _dbg(f"     C diagonal: {np.diag(C.matrix)}")
-                        _dbg(
-                            f"     C off-diagonal norm: {np.linalg.norm(C.matrix - np.diag(np.diag(C.matrix))):.6e}"
-                        )
-
-                        # Detailed B and C analysis
-                        _dbg("=" * 70)
-                        _dbg("     DENSITY MATRIX ANALYSIS")
-                        _dbg("=" * 70)
-                        _dbg(f"     B diagonal elements: {np.real(np.diag(B.matrix))}")
-                        _dbg(f"     C diagonal elements: {np.real(np.diag(C.matrix))}")
-                        _dbg(f"     Tr[B] = {B.trace():.6e}")
-                        _dbg(f"     Tr[C] = {C.trace():.6e}")
-
-                        # Compute contractions explicitly
-                        contr_BC = B.contract(C)
-                        _dbg(f"     <B,C> = {contr_BC:.6e}")
-
-                        # B_EWSL construction
-                        B_ewsl = B.apply_sudakov(delta)
-                        _dbg(f"     B_EWSL diagonal: {np.real(np.diag(B_ewsl.matrix))}")
-                        contr_BewslC = B_ewsl.contract(C)
-                        _dbg(f"     <B_EWSL,C> = {contr_BewslC:.6e}")
-
                         # Compute density weight (central)
                         weight = compute_density_weight(B, C, delta)
-                        _dbg(f"     density_weight (central): {weight:.6f}")
 
                         # Compute variation weight (s_to_rij=False) if available
                         weight_var = None
                         if delta_var is not None:
                             weight_var = compute_density_weight(B, C, delta_var)
-                            _dbg(f"     density_weight (s_to_rij=False): {weight_var:.6f}")
 
                         use_density_path = True
                     else:
-                        _dbg("     C matrix: None (no decay info), falling back to scalar")
                         use_density_path = False
 
                 except Exception as e:
@@ -5023,25 +4122,16 @@ class FxFxEWSudakovMixin:
                         RuntimeWarning,
                         stacklevel=2,
                     )
-                    _dbg(f"  -> Density matrix call FAILED: {e}")
                     use_density_path = False
 
             # Fallback to scalar path if density matrix not available or failed
             if not use_density_path:
-                _dbg("=" * 70)
-                _dbg("===== SCALAR PATH (fallback) =====")
-                _dbg("=" * 70)
                 res = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
                 born, sud_weak = res[0], res[2]
                 weight = 1.0 + sud_weak / born if abs(born) > 1e-30 else 1.0
-                # s_to_rij_off variant: the scalar ewsudakov() call already returns
-                # res[3] (NLL Sudakov with s_to_rij=OFF). Mirror the 5SUD path
-                # (~line 3762) instead of leaving the 21/26/31XX column hardcoded to
-                # 1.0, which read as a (false) zero s_to_rij scheme uncertainty.
+                # s_to_rij_off variant: the scalar ewsudakov() call returns res[3]
+                # (NLL Sudakov with s_to_rij=OFF), used as in the scalar FxFx path.
                 weight_var = (1.0 + res[3] / born) if abs(born) > 1e-30 else 1.0
-                _dbg(f"     born={born:.6e}, sud_weak={sud_weak:.6e}")
-                _dbg(f"     weight = 1 + sud_weak/born = {weight:.6f}")
-                _dbg(f"     weight_var = 1 + res[3]/born = {weight_var:.6f}  (s_to_rij_off)")
 
             # Log event processing
             density_logger.log_event(
@@ -5051,8 +4141,7 @@ class FxFxEWSudakovMixin:
                 weight=weight,
             )
 
-        except Exception as e:
-            _dbg(f"  -> EXCEPTION in density Sudakov: {e}")
+        except Exception:
             return self._compute_ewsudakov_fxfx_reweight(event, sud_mod)
 
         # The scalar kernel supplies the Sherpa QED factor; the density kernel
@@ -5062,31 +4151,13 @@ class FxFxEWSudakovMixin:
             res_for_sq = sud_mod.ewsudakov(prep["sorted_tag"], prep["p_in"], prep["gstr"])
             if abs(res_for_sq[0]) > 1e-30:
                 weight_sherpa_qed = 1.0 + res_for_sq[1] / res_for_sq[0]
-                _dbg(
-                    f"  -> sherpa_qed extraction: born={res_for_sq[0]:.6e}, "
-                    f"sq_delta={res_for_sq[1]:.6e}, weight_sherpa_qed={weight_sherpa_qed:.6f}"
-                )
-            else:
-                _dbg(
-                    f"  -> sherpa_qed extraction: |born|={abs(res_for_sq[0]):.3e} < 1e-30, "
-                    f"weight_sherpa_qed=1.0 (no reweight)"
-                )
-        except Exception as exc:  # noqa: BLE001 — robustness: never let extraction failure abort the event
-            _dbg(f"  -> WARNING: sherpa_qed extraction via scalar ewsudakov() failed ({exc}); using 1.0")
+        except Exception:  # noqa: BLE001 — robustness: never let extraction failure abort the event
             weight_sherpa_qed = 1.0
         weight, weight_var, weight_sherpa_qed = limit_sudakov_factors(
             [weight, weight_var if weight_var is not None else 1.0, weight_sherpa_qed],
             "events_runaway_damped_density")
 
         # Build output dictionary
-        _dbg("-" * 70)
-        _dbg(f"FINAL WEIGHT (central): {weight:.6f}")
-        if weight_var is not None:
-            _dbg(f"FINAL WEIGHT (s_to_rij=False): {weight_var:.6f}")
-        _dbg(f"FINAL WEIGHT (sherpa_qed): {weight_sherpa_qed:.6f}")
-        _dbg(f"Event original weight: {event.wgt}")
-        _dbg(f"Reweighted = {event.wgt} * {weight:.6f} = {event.wgt * weight:.6e}")
-        _dbg("=" * 70)
         return self._build_sudakov_rwgt_dict(event, [weight, weight_var, weight_sherpa_qed])
 
     # =========================================================================
@@ -5107,12 +4178,9 @@ class FxFxEWSudakovMixin:
         Returns:
             DensityMatrix for decays, or None if no decays present
         """
-        _dbg("  -> _get_decay_density_matrix: Building decay matrix C")
         c_defs = getattr(self, "_density_last_C_def", None)
         if not c_defs:
-            _dbg("     No clustering-based C_def available, returning None")
             return None
-        _dbg(f"     C_def entries={len(c_defs)}")
 
         decay_matrices = []
 
@@ -5120,9 +4188,7 @@ class FxFxEWSudakovMixin:
             res_pdg = entry["res_pdg"]
             res_idx = entry["res_cluster_idx"]
             decay_lhe = entry["decay_lhe"]
-            _dbg(f"     resonance pdg={res_pdg}, cluster_idx={res_idx}, decay_lhe={decay_lhe}")
             if not decay_lhe:
-                _dbg(f"     Resonance {res_pdg} has no decay LHE indices, skipping")
                 continue
 
             decay_event = self._build_decay_event_from_cluster(
@@ -5133,31 +4199,22 @@ class FxFxEWSudakovMixin:
                 decay_lhe,
                 frame_transform=frame_transform,
             )
-            try:
-                decay_tag, decay_order = decay_event.get_tag_and_order()
-                _dbg(f"     Decay event tag/order: {decay_tag}, {decay_order}")
-            except Exception as exc:
-                _dbg(f"     Failed to get decay tag/order: {exc}")
             dim = SPIN_DIMS.get(abs(res_pdg), 2)
             C_r = self._compute_density_matrix_from_event(
                 decay_event, [res_pdg], [dim], label=f"C:{res_pdg}"
             )
             if C_r is None:
-                _dbg(f"     Decay density matrix failed for {res_pdg}, returning None")
                 return None
 
-            _dbg(f"     Decay density matrix for {res_pdg}: trace={C_r.trace():.6e}")
             decay_matrices.append(C_r)
 
         if not decay_matrices:
-            _dbg("     No decay matrices computed, returning None")
             return None
 
         if len(decay_matrices) == 1:
             return decay_matrices[0]
 
         result = build_decay_tensor_product(decay_matrices)
-        _dbg(f"     Tensor product shape: {result.matrix.shape}, trace: {result.trace():.6e}")
         return result
 
     def _build_decay_event_from_cluster(
@@ -5183,10 +4240,6 @@ class FxFxEWSudakovMixin:
         # Get on-shell resonance from clustered event
         res_part = clustered_event[res_idx]
         onshell_res_p4 = FourMomentum([res_part.E, res_part.px, res_part.py, res_part.pz])
-        _dbg(f"     [decay_build] res_idx={res_idx}, res_pdg={res_pdg}")
-        _dbg(
-            f"     [decay_build] on-shell res_p4=({res_part.E:.6e},{res_part.px:.6e},{res_part.py:.6e},{res_part.pz:.6e})"
-        )
 
         # LHE labels identify the transported leaves and their particle metadata.
         transported = getattr(clustered_event, "_fxfx_decay_products", None)
@@ -5211,15 +4264,6 @@ class FxFxEWSudakovMixin:
 
         # Parent momentum carried by the input daughters.
         original_res_p4 = FourMomentum([sum_E, sum_px, sum_py, sum_pz])
-        original_m2 = sum_E**2 - sum_px**2 - sum_py**2 - sum_pz**2
-        original_m = math.sqrt(max(0, original_m2))
-        _dbg(
-            f"     [decay_build] input res_p4=({sum_E:.6e},{sum_px:.6e},{sum_py:.6e},{sum_pz:.6e})"
-        )
-        _dbg(f"     [decay_build] input invariant mass = {original_m:.4f} GeV")
-        _dbg(
-            f"     [decay_build] delta (before transform)=({res_part.E - sum_E:.6e},{res_part.px - sum_px:.6e},{res_part.py - sum_py:.6e},{res_part.pz - sum_pz:.6e})"
-        )
 
         # Transform decay products to match on-shell resonance
         transformed_momenta = _transform_decay_products_to_onshell(
@@ -5241,7 +4285,6 @@ class FxFxEWSudakovMixin:
         decay_event.append(res_particle)
 
         # Build transformed decay products
-        sum_E_new = sum_px_new = sum_py_new = sum_pz_new = 0.0
         for i, p4 in enumerate(transformed_momenta):
             p = lhe_parser.Particle(event=decay_event)
             p.pid = decay_pids[i]
@@ -5252,36 +4295,6 @@ class FxFxEWSudakovMixin:
             p.E = float(p4.E)
             p.mass = decay_masses[i]
             decay_event.append(p)
-            sum_E_new += p4.E
-            sum_px_new += p4.px
-            sum_py_new += p4.py
-            sum_pz_new += p4.pz
-
-        _dbg(
-            f"     [decay_build] transformed sum p4=({sum_E_new:.6e},{sum_px_new:.6e},{sum_py_new:.6e},{sum_pz_new:.6e})"
-        )
-        _dbg(
-            f"     [decay_build] delta (after transform)=({res_part.E - sum_E_new:.6e},{res_part.px - sum_px_new:.6e},{res_part.py - sum_py_new:.6e},{res_part.pz - sum_pz_new:.6e})"
-        )
-
-        # Compute masses for verification
-        res_m2 = res_part.E**2 - res_part.px**2 - res_part.py**2 - res_part.pz**2
-        res_m = math.sqrt(max(0, res_m2))
-        sum_m2 = sum_E_new**2 - sum_px_new**2 - sum_py_new**2 - sum_pz_new**2
-        sum_m = math.sqrt(max(0, sum_m2))
-        _dbg("     [decay_build] MASS CHECK:")
-        _dbg(f"       Resonance mass (on-shell): {res_m:.4f} GeV")
-        _dbg(f"       Sum of decay products mass: {sum_m:.4f} GeV")
-        _dbg(f"       Input invariant mass: {original_m:.4f} GeV")
-        _dbg(f"       Pole mass target: {_get_mother_mass(res_pdg):.4f} GeV")
-        _dbg("     [decay_build] DECAY EVENT STRUCTURE:")
-        for i, p in enumerate(decay_event):
-            p_mag = math.sqrt(p.px**2 + p.py**2 + p.pz**2)
-            m2 = p.E**2 - p.px**2 - p.py**2 - p.pz**2
-            m = math.sqrt(max(0, m2))
-            _dbg(
-                f"       [{i}] pid={p.pid}, status={p.status}, E={p.E:.4f}, |p|={p_mag:.4f}, m={m:.4f}"
-            )
         return decay_event
 
     def _compute_density_matrix_from_event(self, event, target_pdgs, res_dims, label="density"):
@@ -5294,14 +4307,11 @@ class FxFxEWSudakovMixin:
             event: LHE event object
             target_pdgs: PDG codes of particles in the density matrix
             res_dims: Spin dimensions (2=fermion, 3=vector)
-            label: Debug label for logging
+            label: Name of the requested matrix (not used in the computation)
 
         Returns:
             DensityMatrix object or None if computation fails
         """
-        _dbg(f"     [{label}] _compute_density_matrix_from_event: start")
-        _dbg(f"     [{label}] target_pdgs={target_pdgs}, res_dims={res_dims}")
-        _dbg(f"     [{label}] event particles={len(event)}")
 
         # Determine if this is decay (nincoming=1) or production (nincoming=2)
         try:
@@ -5310,25 +4320,19 @@ class FxFxEWSudakovMixin:
         except Exception:
             nincoming = 2  # Default to production
 
-        _dbg(f"     [{label}] nincoming={nincoming}")
-
         # Select appropriate density module paths
         if nincoming == 1:
             # Decay density matrix (C matrix)
             if not getattr(self, "density_decay_id_to_path", None):
-                _dbg(f"     [{label}] No density_decay_id_to_path available")
                 return None
             id_to_path = self.density_decay_id_to_path
             f2pylib = self.density_decay_f2pylib
-            _dbg(f"     [{label}] Using density_decay maps (keys={list(id_to_path.keys())[:3]}...)")
         else:
             # Production density matrix (B matrix)
             if not getattr(self, "density_prod_id_to_path", None):
-                _dbg(f"     [{label}] No density_prod_id_to_path available")
                 return None
             id_to_path = self.density_prod_id_to_path
             f2pylib = self.density_prod_f2pylib
-            _dbg(f"     [{label}] Using density_prod maps (keys={list(id_to_path.keys())[:3]}...)")
 
         # Create DensityHelper with the appropriate module paths
         helper = DensityHelper(self, id_to_path, f2pylib)
@@ -5338,15 +4342,9 @@ class FxFxEWSudakovMixin:
             density_matrix = helper.compute_density_matrix(event, target_pdgs, res_dims)
 
             if density_matrix is None:
-                _dbg(f"     [{label}] DensityHelper returned None")
                 return None
 
-            _dbg(f"     [{label}] DensityHelper returned matrix shape: {density_matrix.shape}")
             return DensityMatrix.from_full_matrix(density_matrix, target_pdgs)
 
-        except Exception as exc:
-            _dbg(f"     [{label}] Density matrix computation FAILED: {exc}")
-            import traceback
-
-            _dbg(f"     [{label}] Traceback: {traceback.format_exc()}")
+        except Exception:
             return None
