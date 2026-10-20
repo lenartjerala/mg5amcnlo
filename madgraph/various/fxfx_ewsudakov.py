@@ -92,7 +92,8 @@ def density_dimensions_supported(total_dim, nres):
 # =============================================================================
 # The FSR mapping can fail to reach the pole mass (see _fks_fsr_mapping): each
 # outcome is identified by a method string. Successful methods leave the mother
-# exactly on its pole mass; every other method returns an off-pole mother.
+# on its pole mass (within 1e-4 M, or 1e-3 √q² for a massless mother); every
+# other method returns an off-pole mother.
 FKS_SUCCESS_METHODS = frozenset(
     [
         "fks_fsr_massive_onshell",
@@ -573,6 +574,16 @@ def _apply_fxfx_frame_transform(momentum, frame_transform):
             transformed = _boost_along_direction(transformed, beta, direction)
         elif operation == "boost_from_rest":
             transformed = transformed.boost(FourMomentum(reference))
+        elif operation == "rescale":
+            # Rescaling: on a lightlike momentum, the boost along its own direction.
+            transformed = FourMomentum(
+                [
+                    reference * transformed.E,
+                    reference * transformed.px,
+                    reference * transformed.py,
+                    reference * transformed.pz,
+                ]
+            )
         else:
             raise ValueError("Unknown FxFx frame operation: %s" % operation)
     return transformed
@@ -983,7 +994,18 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     guard therefore rejects these configurations up front
     (method "fks_fsr_unreachable_target"), and the chosen root is verified
     against the unsquared constraint as a final safety net
-    (method "fks_fsr_spurious_root" if it ever fails).
+    (method "fks_fsr_spurious_root"; reached in floating point for soft
+    recoil systems, E_rec up to about 1 GeV at TeV-scale q²).
+
+    A recoil system is lightlike when |m²_rec| < 1e-6 GeV² and
+    |m²_rec| ≤ 1e-6 E²_rec. The boost along n̂ then acts on it as the rescaling
+    k̄ = r k_rec with r = √((1-β)/(1+β)), applied directly (frame operation
+    "rescale"); r solves (q - r k_rec)² = M² for the input momenta.
+
+    A mapping is reported as on-shell only if the mother is within 1e-4 M of a
+    massive pole (ten times inside the 0.1% mass gate of
+    lhe_parser.Event.check_kinematics_only), or within 1e-3 √q² of zero mass;
+    otherwise the mother is the naive pair momentum (method "fks_fsr_inexact").
 
     Args:
         fks_i: Index of "emitter" particle (will become mother)
@@ -995,7 +1017,8 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         'mother': FourMomentum of clustered mother (on mass shell M)
         'beams': [beam0, beam1] (unchanged for FSR)
         'spectators': dict {idx: FourMomentum} for boosted spectators
-        'spectator_transform': ordered Lorentz operations on spectators
+        'spectator_transform': ordered frame operations on spectators (a boost
+            along n̂, or the rescaling of a lightlike recoil system)
         'method': description of method used
     """
     mother_pid = abs(moth[0]["id"])
@@ -1135,8 +1158,12 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     #
     # The constraint q·k̄_rec = (q² - M²)/2 can be solved for β.
 
-    # Check if spectator is massless (simplifies the calculation)
-    if abs(k_rec_m2) < 1e-6:  # Massless spectator
+    # Check if spectator is massless (simplifies the calculation). Its invariant
+    # mass must be negligible both absolutely and relative to its energy: a soft
+    # wide-angle system is massive.
+    rescale = None
+    m2_negligible = abs(k_rec_m2) < 1e-6 and abs(k_rec_m2) <= 1e-6 * k_rec_E**2
+    if m2_negligible:  # Massless spectator
         # For massless spectator, use the simplified formula
         # k̄_rec_E = γ k_E (1 - β) for particle moving along n̂
         #
@@ -1170,13 +1197,15 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             result["method"] = "fks_fsr_negative_energy"
             return result
 
-        # Now solve for β from: k̄_E = γ k_E (1 - β)
-        # Let r = k̄_E / k_E:
-        # r = (1 - β) / √(1 - β²) = √((1-β)/(1+β))
-        # r² = (1-β)/(1+β)
-        # β = (1 - r²) / (1 + r²)
-
-        r = k_bar_E_target / k_rec_E
+        # The boost of a lightlike k along n̂ is k̄ = r k with
+        # r = (1 - β) / √(1 - β²) = √((1-β)/(1+β)), i.e. β = (1 - r²) / (1 + r²).
+        # r solves (q - r k_rec)² = M² for the input momenta, whose m²_rec is
+        # not exactly zero: m²_rec r² - 2 (q·k_rec) r + (q² - M²) = 0, on the
+        # root continuous with the lightlike limit r = (q² - M²) / (2 q·k_rec).
+        q_dot_k = q.E * k_rec.E - q.px * k_rec.px - q.py * k_rec.py - q.pz * k_rec.pz
+        r = (q2 - M2) / (
+            q_dot_k + math.sqrt(max(0.0, q_dot_k**2 - k_rec_m2 * (q2 - M2)))
+        )
         _cluster_dbg(f"  r = k̄_E/k_E = {r:.6f}")
 
         if r <= 0:
@@ -1190,6 +1219,10 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
         r2 = r * r
         beta = (1.0 - r2) / (1.0 + r2)
         _cluster_dbg(f"  β = (1-r²)/(1+r²) = {beta:.6f}")
+
+        # Applied as the rescaling k̄ = r k, which keeps the mother on its pole
+        # for r far from 1 (soft recoil), where 1 - β² cancels.
+        rescale = r
 
     else:  # Massive spectator - use general quadratic approach
         # For massive spectator, the algebra is more complex.
@@ -1333,8 +1366,8 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
                 result["method"] = "fks_fsr_spurious_root"
                 return result
 
-    # Verify |β| < 1
-    if abs(beta) >= 1.0:
+    # Verify |β| < 1 (the rescaling of a massless recoil system needs only r > 0)
+    if rescale is None and abs(beta) >= 1.0:
         _cluster_dbg(f"  WARNING: |β| = {abs(beta):.6f} >= 1 (superluminal)")
         result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
         for idx in spectator_indices:
@@ -1345,14 +1378,26 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
     if DEBUG:
         _cluster_dbg(f"  [FKS FSR] β={beta:.6f}, n̂=({n_rec[0]:.4f}, {n_rec[1]:.4f}, {n_rec[2]:.4f})")
 
-    # Apply boost B to each spectator: k̄ᵢ = B kᵢ
-    result["spectator_transform"] = [("boost_along_direction", (beta, n_rec))]
-    k_rec_boosted = _boost_along_direction(k_rec, beta, n_rec)
+    if rescale is None:
+        # Apply boost B to each spectator: k̄ᵢ = B kᵢ
+        result["spectator_transform"] = [("boost_along_direction", (beta, n_rec))]
+        k_rec_boosted = _boost_along_direction(k_rec, beta, n_rec)
 
-    for idx in spectator_indices:
-        p_orig = orig_momenta[idx]
-        k_bar_i = _boost_along_direction(p_orig, beta, n_rec)
-        result["spectators"][idx] = k_bar_i
+        for idx in spectator_indices:
+            p_orig = orig_momenta[idx]
+            k_bar_i = _boost_along_direction(p_orig, beta, n_rec)
+            result["spectators"][idx] = k_bar_i
+    else:
+        # Rescale each spectator of the lightlike recoil system: k̄ᵢ = r kᵢ
+        result["spectator_transform"] = [("rescale", rescale)]
+        k_rec_boosted = _apply_fxfx_frame_transform(
+            k_rec, result["spectator_transform"]
+        )
+
+        for idx in spectator_indices:
+            result["spectators"][idx] = _apply_fxfx_frame_transform(
+                orig_momenta[idx], result["spectator_transform"]
+            )
 
     # Mother momentum by conservation: k̄_mother = q - B k_rec
     mother = FourMomentum(
@@ -1363,6 +1408,23 @@ def _fks_fsr_mapping(fks_i, fks_j, moth, orig_momenta):
             q.pz - k_rec_boosted.pz,
         ]
     )
+
+    # The mother must reach its pole: within 1e-4 M for a massive mother, within
+    # 1e-3 √q² of zero mass for a massless one; otherwise it is the naive pair
+    # momentum.
+    if mother_mass > 0.0:
+        off_pole = abs(math.sqrt(max(0.0, _m2(mother))) - mother_mass)
+        off_shell = off_pole > 1e-4 * mother_mass
+    else:
+        off_shell = abs(_m2(mother)) > 1e-6 * q2
+    if off_shell:
+        result["mother"] = orig_momenta[fks_i] + orig_momenta[fks_j]
+        for idx in spectator_indices:
+            result["spectators"][idx] = FourMomentum(orig_momenta[idx])
+        result["spectator_transform"] = []
+        result["method"] = "fks_fsr_inexact"
+        return result
+
     result["mother"] = mother
     result["method"] = "fks_fsr_massive_onshell"
 

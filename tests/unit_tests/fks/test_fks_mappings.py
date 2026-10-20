@@ -9,12 +9,17 @@
 #   - the decay-product on-shell transformation (2-body and multi-body)
 #   - the reachable fallback branches of _fks_fsr_mapping via engineered
 #     kinematics: zero_krec_momentum, negative_energy, negative_r,
-#     unreachable_target (incl. the pre-fix spurious-root acceptance),
-#     no_solution, degenerate, collinear_unphysical. NOT covered:
+#     unreachable_target (incl. the spurious roots of the squared quadratic),
+#     no_solution, degenerate, collinear_unphysical, and for soft massive
+#     recoil systems spurious_root and inexact. NOT covered:
 #     degenerate_collinear (vestigial: only reachable for 0 < R < 1e-10 after
-#     the R <= 0 guard), spurious_root (belt-and-suspenders, unreachable if
-#     the R <= 0 guard and A >= |B| hold), superluminal (boundary-only: all
-#     real roots of the squared quadratic satisfy |beta| <= 1 identically)
+#     the R <= 0 guard), superluminal (boundary-only: all real roots of the
+#     squared quadratic satisfy |beta| <= 1 identically)
+#   - soft lightlike recoil (rescaling, in the CM and in the laboratory frame
+#     with rounded input momenta), the boost of light massive spectators, the
+#     massive treatment of soft wide-angle recoil systems, the pole criterion
+#     of every success for a boosted q, and decay leaves following the
+#     spectator map exactly
 #   - mass-label consistency and method accounting in
 #     fxfx_merge_particles_kinematics (label == sqrt(p^2) for fallbacks,
 #     pole mass for successes; check_kinematics_only passes in both cases)
@@ -305,6 +310,495 @@ class TestFSRFallbackBranches(unittest.TestCase):
             self.assertAlmostEqual(
                 getattr(res["mother"], comp), getattr(naive, comp), places=9
             )
+
+
+def _onshell_tolerance(momenta, mother_mass):
+    # floating-point accuracy of a mapping solved for the input momenta
+    q2 = _m2(momenta[0] + momenta[1])
+    return 1e-9 * max(q2, mother_mass**2)
+
+
+def _within_pole(mother, mother_mass):
+    # on-shell criterion of a successful mapping
+    m = math.sqrt(max(0.0, _m2(mother)))
+    return abs(m - mother_mass) <= 1e-4 * mother_mass
+
+
+def _massless_momentum(E, theta, phi):
+    return FourMomentum(
+        [
+            E,
+            E * math.sin(theta) * math.cos(phi),
+            E * math.sin(theta) * math.sin(phi),
+            E * math.cos(theta),
+        ]
+    )
+
+
+def _lhe_event(rows):
+    """rows: (pid, status, mass, E, px, py, pz) with the LHE mass column."""
+    event = lhe_parser.Event()
+    for pid, status, mass, E, px, py, pz in rows:
+        event.append(_mk_particle(event, pid, status, E, px, py, pz, mass=mass))
+    return event
+
+
+class TestFSRNumericalRobustness(unittest.TestCase):
+    """Soft and nearly lightlike recoil systems: every success reaches the pole,
+    and the spectators, the mother and the transported decay leaves follow one map."""
+
+    def _assert_naive_fallback(self, res, momenta):
+        self.assertNotIn(res["method"], fx.FKS_SUCCESS_METHODS)
+        self.assertEqual(res["spectator_transform"], [])
+        naive = momenta[2] + momenta[3]
+        for comp in ("E", "px", "py", "pz"):
+            self.assertEqual(getattr(res["mother"], comp), getattr(naive, comp))
+        for idx, p in res["spectators"].items():
+            for comp in ("E", "px", "py", "pz"):
+                self.assertEqual(getattr(p, comp), getattr(momenta[idx], comp))
+
+    @staticmethod
+    def _soft_massless_recoil_event(E_rec):
+        # sqrt(s) = 1 TeV, one massless spectator of energy E_rec; the pair
+        # (2, 3) carries the remaining momentum and becomes a W
+        beams = [FourMomentum([500, 0, 0, 500]), FourMomentum([500, 0, 0, -500])]
+        spec = _massless_momentum(E_rec, 2.0, 1.3)
+        p_a = FourMomentum([300, 300, 0, 0])
+        p_b = beams[0] + beams[1] - p_a - spec
+        return beams + [p_a, p_b, spec]
+
+    def test_soft_massless_recoil_onshell(self):
+        for E_rec in (1e-1, 1e-3, 3e-4, 1e-5, 1e-8):
+            momenta = self._soft_massless_recoil_event(E_rec)
+            res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+            self.assertEqual(res["method"], "fks_fsr_massive_onshell", E_rec)
+            self.assertLessEqual(
+                abs(_m2(res["mother"]) - fx.MW_POLE**2),
+                _onshell_tolerance(momenta, fx.MW_POLE),
+                E_rec,
+            )
+            total = res["mother"] + res["spectators"][4]
+            q = momenta[0] + momenta[1]
+            for comp in ("E", "px", "py", "pz"):
+                self.assertAlmostEqual(
+                    getattr(total, comp), getattr(q, comp), delta=1e-9 * q.E
+                )
+
+    def test_soft_massless_recoil_rescales_spectator(self):
+        for E_rec in (1e-1, 1e-3, 3e-4, 1e-5, 1e-8):
+            momenta = self._soft_massless_recoil_event(E_rec)
+            res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+            self.assertEqual(res["spectator_transform"][0][0], "rescale", E_rec)
+            spec = res["spectators"][4]
+            r = res["spectator_transform"][0][1]
+            for comp in ("E", "px", "py", "pz"):
+                self.assertAlmostEqual(
+                    getattr(spec, comp),
+                    r * getattr(momenta[4], comp),
+                    delta=1e-12 * spec.E,
+                )
+            # a decay leaf of the spectator follows the identical map
+            leaf = fx._apply_fxfx_frame_transform(
+                momenta[4], res["spectator_transform"]
+            )
+            for comp in ("E", "px", "py", "pz"):
+                self.assertEqual(getattr(leaf, comp), getattr(spec, comp))
+
+    def test_lab_frame_lightlike_spectator(self):
+        # q Z -> q in the laboratory frame (beta_q = -0.995) with a gluon
+        # spectator whose LHE-rounded momentum has m^2 = 5.8e-7 GeV^2: the
+        # rescaling solves the on-shell condition for these input momenta.
+        event = _lhe_event(
+            [
+                (21, -1, 0.0, 8.520120244, 0.0, 0.0, 8.520120244),
+                (2, -1, 0.0, 3419.6635543, 0.0, 0.0, -3419.6635543),
+                (2, 1, 0.0, 392.37478144, 58.688524463, 77.749701885, -380.09026568),
+                (
+                    23,
+                    1,
+                    91.1876,
+                    2929.8757065,
+                    -75.57807841,
+                    -76.403583926,
+                    -2926.4837132,
+                ),
+                (21, 1, 0.0, 105.93318663, 16.889553947, -1.3461179586, -104.56945521),
+            ]
+        )
+        q = FourMomentum(event[0]) + FourMomentum(event[1])
+        res = fx._fks_fsr_mapping(
+            2, 3, [{"number": 3, "id": 2}], [FourMomentum(p) for p in event]
+        )
+        self.assertEqual(res["spectator_transform"][0][0], "rescale")
+        method = fx.fxfx_merge_particles_kinematics(
+            event, 2, 3, [{"number": 3, "id": 2}]
+        )
+        self.assertEqual(method, "fks_fsr_massive_onshell")
+        self.assertEqual(event[2].pid, 2)
+        self.assertEqual(event[2].mass, 0.0)
+        self.assertLessEqual(abs(_m2(FourMomentum(event[2]))), 1e-12 * _m2(q))
+        event.check_kinematics_only()
+
+    def test_rounded_soft_photon_is_lightlike(self):
+        # A 10 MeV photon whose momentum carries rounding-level mass
+        # (m^2 / E^2 = 1e-8), in a frame where q is not at rest.
+        E = 0.01
+        photon_p = E * (1.0 - 5e-9)
+        photon = FourMomentum([E, photon_p * 0.6, photon_p * 0.0, photon_p * 0.8])
+        beams = [FourMomentum([800, 0, 0, 800]), FourMomentum([200, 0, 0, -200])]
+        p_a = _massless_momentum(250.0, 1.1, 0.4)
+        p_b = beams[0] + beams[1] - p_a - photon
+        momenta = beams + [p_a, p_b, photon]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_massive_onshell")
+        self.assertEqual(res["spectator_transform"][0][0], "rescale")
+        self.assertLessEqual(
+            abs(_m2(res["mother"]) - fx.MW_POLE**2),
+            _onshell_tolerance(momenta, fx.MW_POLE),
+        )
+
+    def test_massive_spectator_keeps_its_mass(self):
+        # A 600 GeV muon: m^2 / E^2 = 3e-8 is small, but m^2 = 0.011 GeV^2 is a
+        # physical mass, so the recoil system is boosted, not rescaled.
+        m_mu = 0.1056583755
+        E = 600.0
+        p = math.sqrt(E**2 - m_mu**2)
+        muon = FourMomentum(
+            [
+                E,
+                p * math.sin(2.0) * math.cos(1.3),
+                p * math.sin(2.0) * math.sin(1.3),
+                p * math.cos(2.0),
+            ]
+        )
+        beams = [FourMomentum([1000, 0, 0, 1000]), FourMomentum([1000, 0, 0, -1000])]
+        p_a = FourMomentum([300, 300, 0, 0])
+        p_b = beams[0] + beams[1] - p_a - muon
+        momenta = beams + [p_a, p_b, muon]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_massive_onshell")
+        self.assertEqual(res["spectator_transform"][0][0], "boost_along_direction")
+        m_after = math.sqrt(max(0.0, _m2(res["spectators"][4])))
+        self.assertAlmostEqual(m_after / m_mu, 1.0, delta=1e-6)
+
+    def test_wide_angle_soft_pair_is_massive(self):
+        # Two 0.7 MeV photons at 90 degrees: m^2_rec = 9.8e-7 GeV^2 is below
+        # 1e-6 GeV^2 but comparable to E^2_rec, so the recoil system is massive.
+        g1 = FourMomentum([0.7e-3, 0.7e-3, 0, 0])
+        g2 = FourMomentum([0.7e-3, 0, 0.7e-3, 0])
+        beams = [FourMomentum([500, 0, 0, 500]), FourMomentum([500, 0, 0, -500])]
+        p_a = FourMomentum([300, 300, 0, 0])
+        p_b = beams[0] + beams[1] - p_a - g1 - g2
+        momenta = beams + [p_a, p_b, g1, g2]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+        self.assertNotIn("rescale", [op for op, _ref in res["spectator_transform"]])
+        if res["method"] in fx.FKS_SUCCESS_METHODS:
+            self.assertTrue(_within_pole(res["mother"], fx.MW_POLE))
+        else:
+            self._assert_naive_fallback(res, momenta)
+        # the merged event keeps a mass label consistent with its kinematics
+        event = _lhe_event(
+            [
+                (21, -1, 0.0, 500, 0, 0, 500),
+                (21, -1, 0.0, 500, 0, 0, -500),
+                (13, 1, 0.0, p_a.E, p_a.px, p_a.py, p_a.pz),
+                (-14, 1, 0.0, p_b.E, p_b.px, p_b.py, p_b.pz),
+                (22, 1, 0.0, g1.E, g1.px, g1.py, g1.pz),
+                (22, 1, 0.0, g2.E, g2.px, g2.py, g2.pz),
+            ]
+        )
+        fx.fxfx_merge_particles_kinematics(event, 2, 3, [{"number": 3, "id": -24}])
+        m_kin = math.sqrt(max(0.0, _m2(FourMomentum(event[2]))))
+        if event[2].mass != fx.MW_POLE:
+            self.assertAlmostEqual(event[2].mass, m_kin, delta=1e-9 * max(1.0, m_kin))
+        event.check_kinematics_only()
+
+    def test_soft_massive_recoil_fallbacks(self):
+        # Wide-angle two-photon recoil systems of 0.35 MeV and 14 MeV: the boost
+        # needs |beta| -> 1. The first fails the unsquared root check, the
+        # second misses the pole by more than 1e-4 M. Both labels are stable
+        # under 1e-12 relative perturbations of the inputs.
+        cases = {
+            "fks_fsr_spurious_root": [
+                [238.4639599737477, 0.0, 0.0, 238.4639599737477],
+                [238.4639599737477, 0.0, 0.0, -238.4639599737477],
+                [
+                    143.07827049475074,
+                    117.4467050112949,
+                    49.65567044191677,
+                    64.89974855669855,
+                ],
+                [
+                    333.8492978210851,
+                    -117.44671385487138,
+                    -49.65575930015483,
+                    -64.89968880261101,
+                ],
+                [
+                    0.00017581582981151224,
+                    1.364203365704181e-05,
+                    0.00013707204056107185,
+                    0.00010925363438547318,
+                ],
+                [
+                    0.00017581582981151224,
+                    -4.798457174322873e-06,
+                    -4.821380249929515e-05,
+                    -0.0001690077219230405,
+                ],
+            ],
+            "fks_fsr_inexact": [
+                [1494.1205279391247, 0.0, 0.0, 1494.1205279391247],
+                [1494.1205279391247, 0.0, 0.0, -1494.1205279391247],
+                [
+                    896.4681187528728,
+                    735.8715361258292,
+                    311.1214953364348,
+                    406.63446164798694,
+                ],
+                [
+                    2091.7589437567035,
+                    -735.8704682162353,
+                    -311.12022499915327,
+                    -406.63049952355396,
+                ],
+                [
+                    0.006996684336627818,
+                    -0.004486135781554201,
+                    -0.005336505604767825,
+                    0.0005915111039986608,
+                ],
+                [
+                    0.006996684336627818,
+                    0.0034182261876529005,
+                    0.00406616832325441,
+                    -0.004553635536954992,
+                ],
+            ],
+        }
+        for method, rows in cases.items():
+            momenta = [FourMomentum(row) for row in rows]
+            res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+            self.assertEqual(res["method"], method)
+            self._assert_naive_fallback(res, momenta)
+
+    def test_near_pole_massive_mapping_is_kept(self):
+        # A soft wide-angle recoil system mapped by the boost to within 1.3e-5 M
+        # of the W pole: inside the 1e-4 M criterion, so it remains a success.
+        momenta = [
+            FourMomentum(row)
+            for row in [
+                [629.9305504702015, 0.0, 0.0, 629.9305504702015],
+                [629.9305504702015, 0.0, 0.0, -629.9305504702015],
+                [
+                    377.95479907555085,
+                    310.24659189082115,
+                    131.17015518806517,
+                    171.43883093485323,
+                ],
+                [
+                    881.8945311762852,
+                    -310.2436303268797,
+                    -131.16958340351616,
+                    -171.4368399211711,
+                ],
+                [
+                    0.005885344283432136,
+                    0.001548872728250166,
+                    0.00029903845127215664,
+                    -0.005669995291961975,
+                ],
+                [
+                    0.005885344283432136,
+                    -0.00451043666968957,
+                    -0.0008708230002789891,
+                    0.0036789816098252086,
+                ],
+            ]
+        ]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_massive_onshell")
+        self.assertEqual(res["spectator_transform"][0][0], "boost_along_direction")
+        self.assertTrue(_within_pole(res["mother"], fx.MW_POLE))
+        m = math.sqrt(max(0.0, _m2(res["mother"])))
+        self.assertGreater(abs(m - fx.MW_POLE), 5e-6 * fx.MW_POLE)
+
+    def test_massless_mother_off_pole_is_inexact(self):
+        # Two 16 keV photons at 90 degrees at sqrt(s) = 5 TeV with a gluon
+        # mother: the boost leaves the mother with m^2 = 0.7 q^2, far beyond the
+        # 1e-6 q^2 allowed for a massless mother.
+        momenta = [
+            FourMomentum(row)
+            for row in [
+                [2498.6410511744325, 0.0, 0.0, 2498.6410511744325],
+                [2498.6410511744325, 0.0, 0.0, -2498.6410511744325],
+                [
+                    1499.1846208719342,
+                    1230.6151962570434,
+                    520.29575985361,
+                    680.0243293283839,
+                ],
+                [
+                    3498.09744870118,
+                    -1230.6152075448172,
+                    -520.2957711088405,
+                    -680.0243130837324,
+                ],
+                [
+                    1.638787557311009e-05,
+                    1.1604288060042795e-05,
+                    1.1570832316503377e-05,
+                    1.3712739568612155e-07,
+                ],
+                [
+                    1.638787557311009e-05,
+                    -3.165143032392387e-07,
+                    -3.156017766541575e-07,
+                    -1.6381778902614822e-05,
+                ],
+            ]
+        ]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 21}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_inexact")
+        self._assert_naive_fallback(res, momenta)
+
+    def test_near_massless_mother_is_kept(self):
+        # A soft wide-angle recoil system with a gluon mother: the boost leaves
+        # m^2 = 6.4e-08 q^2, inside the 1e-6 q^2 allowed for a
+        # massless mother, so it remains a success.
+        momenta = [
+            FourMomentum(row)
+            for row in [
+                [406.01081044718563, 0.0, 0.0, 406.01081044718563],
+                [406.01081044718563, 0.0, 0.0, -406.01081044718563],
+                [
+                    243.60297044172427,
+                    199.96304197983744,
+                    84.54301814732963,
+                    110.49736256011568,
+                ],
+                [
+                    568.40693103069,
+                    -199.97011817858854,
+                    -84.54313011806855,
+                    -110.50285489100789,
+                ],
+                [
+                    0.005859710978462199,
+                    0.0012220761141021812,
+                    1.933760912009812e-05,
+                    0.005730826186452077,
+                ],
+                [
+                    0.005859710978462199,
+                    0.00585412263699704,
+                    9.26331297936664e-05,
+                    -0.0002384952942384235,
+                ],
+            ]
+        ]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 21}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_massive_onshell")
+        q2 = _m2(momenta[0] + momenta[1])
+        self.assertLessEqual(abs(_m2(res["mother"])), 1e-6 * q2)
+        self.assertGreater(abs(_m2(res["mother"])), 1e-8 * q2)
+
+    def test_near_collinear_soft_pair_is_boosted(self):
+        # Two 25 MeV photons 0.02 rad apart (m^2_rec = 2.5e-7 GeV^2,
+        # m^2_rec / E^2_rec = 1e-4): the recoil system is massive, and the boost
+        # keeps its invariant mass.
+        momenta = [
+            FourMomentum(row)
+            for row in [
+                [150.0, 0.0, 0.0, 150.0],
+                [150.0, 0.0, 0.0, -150.0],
+                [89.985, 73.86475747782474, 31.229518565363225, 40.81684698648058],
+                [
+                    209.96499999999997,
+                    -73.90191386291258,
+                    -31.249817191050308,
+                    -40.84343869290857,
+                ],
+                [
+                    0.025,
+                    0.01846150656510322,
+                    0.010085567002783374,
+                    0.013507557646703494,
+                ],
+                [0.025, 0.0186948785227415, 0.010213058684300886, 0.013084148781291239],
+            ]
+        ]
+        res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+        self.assertEqual(res["method"], "fks_fsr_massive_onshell")
+        self.assertEqual(res["spectator_transform"][0][0], "boost_along_direction")
+        k = momenta[4] + momenta[5]
+        k_bar = res["spectators"][4] + res["spectators"][5]
+        self.assertAlmostEqual(_m2(k_bar) / _m2(k), 1.0, delta=1e-3)
+
+    def test_every_success_reaches_the_pole(self):
+        # Soft two-photon recoil systems and ordinary spectators, with unequal
+        # beam energies so that q is not at rest.
+        random.seed(11)
+        n_success = 0
+        for n in range(1200):
+            e1, e2 = random.uniform(100.0, 1500.0), random.uniform(100.0, 1500.0)
+            beams = [FourMomentum([e1, 0, 0, e1]), FourMomentum([e2, 0, 0, -e2])]
+            q = beams[0] + beams[1]
+            rs = math.sqrt(_m2(q))
+            if n % 2:
+                E = 10 ** random.uniform(-3.5, 0.0)
+                th, ph = random.uniform(0.2, 2.9), random.uniform(0.0, 6.28)
+                opening = random.uniform(0.05, 3.0)
+                specs = [
+                    _massless_momentum(E / 2, th, ph),
+                    _massless_momentum(E / 2, th + opening, ph),
+                ]
+            else:
+                specs = [
+                    _massless_momentum(
+                        random.uniform(5.0, rs / 4),
+                        random.uniform(0.1, 3.0),
+                        random.uniform(0.0, 6.28),
+                    )
+                    for _s in range(random.choice([1, 2]))
+                ]
+            p_a = _massless_momentum(random.uniform(0.1, 0.4) * rs, 1.1, 0.4)
+            p_b = q - p_a
+            for spec in specs:
+                p_b = p_b - spec
+            if p_b.E <= 0 or _m2(p_b) <= 0:
+                continue
+            momenta = beams + [p_a, p_b] + specs
+            res = fx._fks_fsr_mapping(2, 3, [{"number": 3, "id": 24}], momenta)
+            if res["method"] not in fx.FKS_SUCCESS_METHODS:
+                self._assert_naive_fallback(res, momenta)
+                continue
+            n_success += 1
+            self.assertTrue(_within_pole(res["mother"], fx.MW_POLE))
+            if res["spectator_transform"][0][0] == "rescale":
+                self.assertLessEqual(
+                    abs(_m2(res["mother"]) - fx.MW_POLE**2),
+                    _onshell_tolerance(momenta, fx.MW_POLE),
+                )
+            total = FourMomentum(res["mother"])
+            for idx, p in res["spectators"].items():
+                total += p
+                leaf = fx._apply_fxfx_frame_transform(
+                    momenta[idx], res["spectator_transform"]
+                )
+                for comp in ("E", "px", "py", "pz"):
+                    self.assertEqual(getattr(leaf, comp), getattr(p, comp))
+            for comp in ("E", "px", "py", "pz"):
+                self.assertAlmostEqual(
+                    getattr(total, comp), getattr(q, comp), delta=1e-9 * q.E
+                )
+        self.assertGreater(n_success, 300)
+
+    def test_rescale_frame_operation(self):
+        p = FourMomentum([5.0, 3.0, 0.0, 4.0])
+        out = fx._apply_fxfx_frame_transform(p, [("rescale", 2.5)])
+        for comp in ("E", "px", "py", "pz"):
+            self.assertEqual(getattr(out, comp), 2.5 * getattr(p, comp))
 
 
 class TestMergeLabelConsistency(unittest.TestCase):
