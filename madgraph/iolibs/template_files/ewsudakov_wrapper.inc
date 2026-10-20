@@ -381,6 +381,36 @@ return
 end
 
 
+
+
+
+integer function sdk_get_ncomb()
+implicit none
+INTEGER     NCOMB
+PARAMETER ( NCOMB=  %(ncomb)d )
+
+sdk_get_ncomb = ncomb
+
+return
+end
+
+
+subroutine sdk_get_hels(ihel, hels)
+implicit none
+include 'nexternal.inc'
+INTEGER IHEL, i
+INTEGER HELS(nexternal-1)
+INTEGER     NCOMB
+PARAMETER ( NCOMB=  %(ncomb)d )
+INTEGER NHEL(NEXTERNAL-1,NCOMB)
+%(helicity_lines)s
+
+hels(:) = NHEL(:, ihel)
+
+return
+end
+
+
 double precision function compensate_identical_factor(igold_me)
 C     provides the multiplicative factor for the result of the
 C      sudakov MEs so that they have the same identical-particle

@@ -79,13 +79,13 @@ MINTMC= $(RUN) driver_mintMC.o handling_lhe_events.o write_event.o BinothLHA.o
 POLES= $(RUN) check_poles.o BinothLHA.o pythia8_fortran_dummy.o write_event.o handling_lhe_events.o
 
 # Files for check_sudakov
-EWSUD= $(RUN) check_sudakov.o BinothLHA.o
+EWSUD= $(RUN) check_sudakov.o BinothLHA.o pythia8_fortran_dummy.o write_event.o handling_lhe_events.o
 
 EWSUDSA = sa_ewsudakov.o sub_f2py_ewsudakov.o $(FILESSUD) 
 EWSUDLIB = $(FILESSUD)
 
 # Files for check_sudakov_angle2
-EWSUD2= $(RUN) check_sudakov_angle2.o BinothLHA.o
+EWSUD2= $(RUN) check_sudakov_angle2.o BinothLHA.o pythia8_fortran_dummy.o write_event.o handling_lhe_events.o
 
 # Files for tests
 TEST= $(RUN) test_soft_col_limits.o BinothLHADummy.o pythia8_fortran_dummy.o write_event.o handling_lhe_events.o
