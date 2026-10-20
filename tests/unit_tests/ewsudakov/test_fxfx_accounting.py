@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 from madgraph.various import fxfx_ewsudakov as fx
-from tests.unit_tests.fks import test_sudakov_factor_limits as limits
+from tests.unit_tests.ewsudakov import test_sudakov_factor_limits as limits
 
 
 class TestFxFxAccounting(unittest.TestCase):

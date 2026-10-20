@@ -8,7 +8,7 @@ import numpy as np
 
 from madgraph.interface.reweight_interface import ReweightInterface
 from madgraph.various import fxfx_ewsudakov as fx
-from tests.unit_tests.fks.test_fxfx_decay_transport import make_event, ww_event
+from tests.unit_tests.ewsudakov.test_fxfx_decay_transport import make_event, ww_event
 
 
 class FactorDriver(fx.FxFxEWSudakovMixin):
