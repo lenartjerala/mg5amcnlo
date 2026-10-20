@@ -3349,7 +3349,6 @@ class RunCard(ConfigFile):
         if not os.path.exists(pjoin(output_dir,path)):
             misc.sprint("include file not existing", pjoin(output_dir,path))
             out = {name: self[name] for name in list_of_params}
-            return out
 
         with open(pjoin(output_dir,path), 'r') as fsock:
             text = fsock.read()
@@ -4392,15 +4391,10 @@ class RunCardLO(RunCard):
 
     dummy_fct_file = {"dummy_cuts": pjoin("SubProcesses","dummy_fct.f"),
                       "get_dummy_x1": pjoin("SubProcesses","dummy_fct.f"),
-                      "get_dummy_x1_x2": pjoin("SubProcesses","dummy_fct.f"),
+                      "get_dummy_x1_x2": pjoin("SubProcesses","dummy_fct.f"), 
                       "dummy_boostframe": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_wgt_custom": pjoin("SubProcesses","dummy_fct.f"),
-                      # NLO name of the bias function, as in RunCardNLO
-                      "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
-                      # stub defined in some custom_fcts files (e.g. of samples to be
-                      # reweighted); listed so that it does not raise InvalidRunCard
-                      "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
     
@@ -5827,9 +5821,6 @@ class RunCardNLO(RunCard):
     dummy_fct_file = {"dummy_cuts": pjoin("SubProcesses","dummy_fct.f"),
                       "user_dynamical_scale": pjoin("SubProcesses","dummy_fct.f"),
                       "bias_weight_function": pjoin("SubProcesses","dummy_fct.f"),
-                      # stub defined in some custom_fcts files (e.g. of samples to be
-                      # reweighted); listed so that it does not raise InvalidRunCard
-                      "dummy_bias_fct": pjoin("SubProcesses","dummy_fct.f"),
                       "user_": pjoin("SubProcesses","dummy_fct.f") # all function starting by user will be added to that file
                       }
 

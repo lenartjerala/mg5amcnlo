@@ -55,7 +55,7 @@ c One <clustering> string per iproc of the current event
       CHARACTER*32 momstr
       CHARACTER*32 cidstr
       CHARACTER*8 role
-      CHARACTER*200 temp
+      CHARACTER*2000 temp
       CHARACTER*64 temp0
       CHARACTER*50 pairstr
       CHARACTER*6  tmpidx
