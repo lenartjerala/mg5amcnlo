@@ -337,6 +337,38 @@ class TestCallSites(unittest.TestCase):
                 self.assertNotEqual(value, "add process")
 
 
+class TestSudakovF2pyBuild(unittest.TestCase):
+    """The ewsudpy f2py module builds with the meson backend (Python >= 3.12).
+
+    meson compiles in its own build directory and resolves the
+    sub_f2py_ewsudakov.f link to SubProcesses/, so the process directory, which
+    holds the included files, must be passed to f2py explicitly.
+    """
+
+    subprocesses = Path(MG5DIR) / "Template/NLO/SubProcesses"
+
+    def test_process_directory_is_an_include_path(self):
+        recipe = (self.subprocesses / "makefile_fks_dir").read_text()
+        lines = [
+            row
+            for row in recipe.splitlines()
+            if "sub_f2py_ewsudakov.f" in row and "$(F2PY)" in row
+        ]
+        self.assertEqual(len(lines), 1)
+        command = lines[0].split("$(F2PY)", 1)[1].split()
+        self.assertIn("-I$(HERE)", command)
+        self.assertLess(
+            command.index("-I$(HERE)"), command.index("sub_f2py_ewsudakov.f")
+        )
+
+    def test_includes_are_process_directory_files(self):
+        source = (self.subprocesses / "sub_f2py_ewsudakov.f").read_text()
+        includes = set(re.findall(r"^\s+include\s+'([^']+)'", source, re.I | re.M))
+        self.assertTrue(includes)
+        # files written into each P* directory of an EW Sudakov output
+        self.assertLessEqual(includes, {"nexternal.inc", "coupl.inc", "orders.inc"})
+
+
 class TestSudakovDispatcherImport(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
